@@ -1,4 +1,4 @@
-# Stack LLM locale — UM890 Pro / Bazzite
+# Stack LLM locale — Bazzite
 
 Installation tout-en-un d'une stack LLM locale sur **Bazzite OS** avec le iGPU **Radeon 780M** (Ryzen 9 8945HS), via une **distrobox Fedora** qui compile `llama.cpp` avec Vulkan.
 
