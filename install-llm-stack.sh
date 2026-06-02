@@ -2,46 +2,46 @@
 # =============================================================================
 #  install-llm-stack.sh
 #  --------------------------------------------------------------------------
-#  Installation tout-en-un de la stack LLM locale sur Bazzite OS
-#  Cible : UM890 Pro (Ryzen 9 8945HS + Radeon 780M iGPU) — adapte si besoin
-#  Modèles :
-#    - Chat   : Qwen3.6-35B-A3B (UD-Q4_K_XL, ~21 GiB) sur port 8080
-#    - FIM    : Qwen2.5-Coder-1.5B (Q8_0, ~1.7 GiB)    sur port 8081
-#    - Search : open-websearch MCP (conteneur podman)  sur port 3333
+#  All-in-one installer for the local LLM stack on Bazzite OS
+#  Target : UM890 Pro (Ryzen 9 8945HS + Radeon 780M iGPU) — adapt if needed
+#  Models / services :
+#    - Chat   : Qwen3.6-35B-A3B (UD-Q4_K_XL, ~21 GiB) on port 8080
+#    - FIM    : Qwen2.5-Coder-1.5B (Q8_0, ~1.7 GiB)    on port 8081
+#    - Search : open-websearch MCP (podman container)  on port 3333
 #
-#  Idempotent : tu peux le relancer autant de fois que tu veux, il ne casse
-#  rien et reprend là où il en est. Chaque étape vérifie l'état avant d'agir.
+#  Idempotent : you can re-run it as many times as you want, it won't break
+#  anything and picks up where it left off. Each step checks state before acting.
 #
 #  Usage :
-#    bash install-llm-stack.sh                # tout faire
-#    bash install-llm-stack.sh --skip-kargs   # sauter la conf kargs (déjà faite)
-#    bash install-llm-stack.sh --skip-build   # sauter la compile llama.cpp
-#    bash install-llm-stack.sh --status       # juste afficher l'état
+#    bash install-llm-stack.sh                # do everything
+#    bash install-llm-stack.sh --skip-kargs   # skip kargs config (already done)
+#    bash install-llm-stack.sh --skip-build   # skip the llama.cpp build
+#    bash install-llm-stack.sh --status       # just show the current state
 #
-#  Voir README.md (à côté de ce script) pour la GTT et les mises à jour.
+#  See README.md (next to this script) for GTT and updates.
 # =============================================================================
 
-set -u  # variable non définie = erreur (pas -e : on gère les erreurs à la main)
+set -u  # undefined variable = error (not -e : we handle errors manually)
 
-# ---------- Variables ajustables ----------
+# ---------- Tunable variables ----------
 CONTAINER_NAME="llm"
 FEDORA_IMAGE="registry.fedoraproject.org/fedora-toolbox:41"
 LLAMA_REPO="https://github.com/ggml-org/llama.cpp"
 LLAMA_DIR="$HOME/llama.cpp"
 LOG_DIR="$HOME/llm-logs"
 
-# GTT cible : 48 GiB (laisse ~16 GiB au système sur une machine 64 GiB RAM)
-GTT_PAGES_LIMIT=12582912   # 12582912 × 4 KiB = 48 GiB
-GTT_POOL_SIZE=6291456      # 6291456  × 4 KiB = 24 GiB (moitié)
+# Target GTT : 48 GiB (leaves ~16 GiB to the system on a 64 GiB RAM machine)
+GTT_PAGES_LIMIT=12582912   # 12582912 x 4 KiB = 48 GiB
+GTT_POOL_SIZE=6291456      # 6291456  x 4 KiB = 24 GiB (half)
 GTT_AMDGPU_SIZE=49152      # 49152 MiB = 48 GiB
 
-# ---------- Couleurs ----------
+# ---------- Colors ----------
 R="\033[0;31m"; G="\033[0;32m"; Y="\033[0;33m"; B="\033[0;34m"; C="\033[0;36m"; N="\033[0m"
-ok()    { echo -e "${G}✅${N} $*"; }
-info()  { echo -e "${C}ℹ️${N}  $*"; }
-warn()  { echo -e "${Y}⚠️${N}  $*"; }
-err()   { echo -e "${R}❌${N} $*" >&2; }
-step()  { echo -e "\n${B}═══ $* ═══${N}"; }
+ok()    { echo -e "${G}OK${N} $*"; }
+info()  { echo -e "${C}--${N} $*"; }
+warn()  { echo -e "${Y}!!${N}  $*"; }
+err()   { echo -e "${R}XX${N} $*" >&2; }
+step()  { echo -e "\n${B}=== $* ===${N}"; }
 
 # ---------- Flags ----------
 SKIP_KARGS=0; SKIP_BUILD=0; STATUS_ONLY=0
@@ -53,64 +53,64 @@ for arg in "$@"; do
     -h|--help)
       sed -n '2,/^# ===/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
-    *) err "Argument inconnu : $arg" ; exit 1 ;;
+    *) err "Unknown argument : $arg" ; exit 1 ;;
   esac
 done
 
-# ---------- Vérifs préalables ----------
+# ---------- Preflight checks ----------
 preflight() {
-  step "Vérifications préalables"
+  step "Preflight checks"
 
   if [ "$EUID" -eq 0 ]; then
-    err "Ne lance pas ce script en root. Il utilise sudo où c'est nécessaire."
+    err "Do not run this script as root. It uses sudo where needed."
     exit 1
   fi
 
   if ! grep -qi 'bazzite\|fedora' /etc/os-release 2>/dev/null; then
-    warn "OS non détecté comme Bazzite/Fedora. Continue à tes risques."
+    warn "OS not detected as Bazzite/Fedora. Continue at your own risk."
   else
-    ok "Système Bazzite/Fedora détecté"
+    ok "Bazzite/Fedora system detected"
   fi
 
   if ! command -v podman >/dev/null; then
-    err "podman introuvable — anormal sur Bazzite. Abandon."
+    err "podman not found — abnormal on Bazzite. Aborting."
     exit 1
   fi
   ok "podman : $(podman --version)"
 
   if ! command -v distrobox >/dev/null; then
-    err "distrobox introuvable. Sur Bazzite il est livré d'office. Abandon."
+    err "distrobox not found. It ships by default on Bazzite. Aborting."
     exit 1
   fi
   ok "distrobox : $(distrobox --version 2>&1 | head -1)"
 
   RAM_GIB=$(free -g | awk '/^Mem:/ {print $2}')
-  info "RAM totale détectée : ${RAM_GIB} GiB"
+  info "Total RAM detected : ${RAM_GIB} GiB"
   if [ "$RAM_GIB" -lt 30 ]; then
-    warn "Moins de 32 GiB de RAM — Qwen3.6-35B ne tiendra pas. Pense à réduire."
+    warn "Less than 32 GiB of RAM — Qwen3.6-35B won't fit. Consider downsizing."
   fi
 
   if [ -e /dev/dri ] && [ -e /dev/kfd ]; then
-    ok "Périphériques GPU AMD présents (/dev/dri, /dev/kfd)"
+    ok "AMD GPU devices present (/dev/dri, /dev/kfd)"
   else
-    warn "Pas de /dev/kfd — le iGPU sera quand même utilisable via /dev/dri/Vulkan"
+    warn "No /dev/kfd — the iGPU is still usable via /dev/dri/Vulkan"
   fi
 }
 
-# ---------- Statut ----------
+# ---------- Status ----------
 show_status() {
-  step "État actuel de la stack"
+  step "Current stack state"
 
-  echo -e "${C}Kargs effectifs au boot :${N}"
+  echo -e "${C}Effective boot kargs :${N}"
   cat /proc/cmdline | tr ' ' '\n' | grep -E 'gtt|ttm|amdgpu' | sed 's/^/  /' \
-    || echo "  (aucun karg GPU appliqué)"
+    || echo "  (no GPU kargs applied)"
 
-  echo -e "\n${C}VRAM carve-out (cible des Failed to allocate) :${N}"
+  echo -e "\n${C}VRAM carve-out (target of the Failed to allocate errors) :${N}"
   for f in /sys/class/drm/card*/device/mem_info_vram_total; do
     [ -f "$f" ] && awk '{printf "  VRAM total : %.0f MiB\n", $1/1048576}' < "$f"
   done
 
-  echo -e "\n${C}GTT exposée par le driver :${N}"
+  echo -e "\n${C}GTT exposed by the driver :${N}"
   for f in /sys/class/drm/card*/device/mem_info_gtt_total; do
     [ -f "$f" ] && awk '{printf "  GTT total : %.1f GiB\n", $1/1073741824}' < "$f"
   done
@@ -118,7 +118,7 @@ show_status() {
     [ -f "$f" ] && awk '{printf "  GTT used  : %.1f GiB\n", $1/1073741824}' < "$f"
   done
 
-  echo -e "\n${C}Container distrobox :${N}"
+  echo -e "\n${C}distrobox container :${N}"
   if podman ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
     state=$(podman inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
     echo "  $CONTAINER_NAME : $state"
@@ -126,20 +126,20 @@ show_status() {
     echo "  $CONTAINER_NAME : absent"
   fi
 
-  echo -e "\n${C}Binaire llama-server :${N}"
+  echo -e "\n${C}llama-server binary :${N}"
   if [ -x "$LLAMA_DIR/build/bin/llama-server" ]; then
     ok "$LLAMA_DIR/build/bin/llama-server"
   else
-    warn "non compilé"
+    warn "not built"
   fi
 
-  echo -e "\n${C}Services en écoute :${N}"
-  ss -tlnp 2>/dev/null | grep -E '8080|8081' | sed 's/^/  /' \
-    || echo "  (aucun port 8080/8081 ouvert)"
+  echo -e "\n${C}Services listening :${N}"
+  ss -tlnp 2>/dev/null | grep -E '8080|8081|3333' | sed 's/^/  /' \
+    || echo "  (no port 8080/8081/3333 open)"
 
   echo -e "\n${C}llm-stack.service :${N}"
   systemctl --user is-active llm-stack.service 2>/dev/null | sed 's/^/  /' \
-    || echo "  non installé"
+    || echo "  not installed"
 }
 
 if [ "$STATUS_ONLY" -eq 1 ]; then
@@ -147,12 +147,12 @@ if [ "$STATUS_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-# ---------- Étape 1 : kargs GTT ----------
+# ---------- Step 1 : GTT kargs ----------
 configure_kargs() {
-  step "1. Configuration des kargs GTT (48 GiB)"
+  step "1. GTT kargs configuration (48 GiB)"
 
   if [ "$SKIP_KARGS" -eq 1 ]; then
-    info "Sauté (--skip-kargs)"
+    info "Skipped (--skip-kargs)"
     return
   fi
 
@@ -161,20 +161,20 @@ configure_kargs() {
 
   if echo "$current" | grep -q "ttm.pages_limit=$GTT_PAGES_LIMIT" \
      && echo "$current" | grep -q "amdgpu.gttsize=$GTT_AMDGPU_SIZE"; then
-    ok "Kargs déjà appliqués au boot courant"
+    ok "Kargs already applied on the current boot"
     return
   fi
 
   pending_kargs=$(rpm-ostree kargs 2>/dev/null || echo "")
   if echo "$pending_kargs" | grep -q "ttm.pages_limit=$GTT_PAGES_LIMIT" \
      && echo "$pending_kargs" | grep -q "amdgpu.gttsize=$GTT_AMDGPU_SIZE"; then
-    warn "Kargs déjà stagés pour le prochain boot. Reboote pour les activer."
+    warn "Kargs already staged for next boot. Reboot to activate them."
     return
   fi
 
-  info "Application des kargs (nécessite sudo + reboot ensuite)"
+  info "Applying kargs (requires sudo + a reboot afterwards)"
 
-  # On nettoie d'éventuelles anciennes valeurs avant de poser les nouvelles
+  # Clean up any old values before laying down the new ones
   cur_pages=$(echo "$current" | grep -oP 'ttm\.pages_limit=\K\d+' || true)
   cur_pool=$(echo "$current" | grep -oP 'ttm\.page_pool_size=\K\d+' || true)
   cur_gtt=$(echo "$current" | grep -oP 'amdgpu\.gttsize=\K\d+' || true)
@@ -197,33 +197,33 @@ configure_kargs() {
   fi
 
   sudo rpm-ostree kargs "${args[@]}"
-  ok "Kargs stagés — reboot requis à la fin du script."
+  ok "Kargs staged — reboot required at the end of the script."
   needs_reboot=1
   echo "NEEDS_REBOOT=1" > /tmp/.llm-stack-reboot
 }
 
-# ---------- Étape 2 : container distrobox ----------
+# ---------- Step 2 : distrobox container ----------
 create_container() {
-  step "2. Création du container distrobox '$CONTAINER_NAME'"
+  step "2. Creating distrobox container '$CONTAINER_NAME'"
 
   if podman ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
-    ok "Container '$CONTAINER_NAME' existe déjà"
+    ok "Container '$CONTAINER_NAME' already exists"
   else
-    info "Création (image $FEDORA_IMAGE)…"
+    info "Creating (image $FEDORA_IMAGE)..."
     distrobox create \
       --name "$CONTAINER_NAME" \
       --image "$FEDORA_IMAGE" \
       --additional-flags "--device=/dev/dri --device=/dev/kfd" \
       --yes
-    ok "Container créé"
+    ok "Container created"
   fi
 
-  info "Démarrage du container"
+  info "Starting the container"
   podman start "$CONTAINER_NAME" >/dev/null
-  ok "Container démarré"
+  ok "Container started"
 
-  # Installe les dépendances via distrobox enter (idempotent)
-  info "Installation des dépendances dans le container (idempotent)…"
+  # Install dependencies via distrobox enter (idempotent)
+  info "Installing dependencies inside the container (idempotent)..."
   distrobox enter "$CONTAINER_NAME" -- bash -c '
     set -e
     if ! command -v cmake >/dev/null || ! command -v vulkaninfo >/dev/null; then
@@ -233,34 +233,34 @@ create_container() {
         glslc glslang shaderc \
         jq
     fi
-    echo "✅ Dépendances OK"
+    echo "Dependencies OK"
   '
 }
 
-# ---------- Étape 3 : compile llama.cpp ----------
+# ---------- Step 3 : build llama.cpp ----------
 build_llama() {
-  step "3. Compilation de llama.cpp avec Vulkan"
+  step "3. Building llama.cpp with Vulkan"
 
   if [ "$SKIP_BUILD" -eq 1 ]; then
-    info "Sauté (--skip-build)"
+    info "Skipped (--skip-build)"
     return
   fi
 
   if [ -x "$LLAMA_DIR/build/bin/llama-server" ]; then
-    info "llama-server déjà compilé. Pour rebuilder : --skip-build=no + rm -rf $LLAMA_DIR/build"
-    ok "Binaire présent : $LLAMA_DIR/build/bin/llama-server"
+    info "llama-server already built. To rebuild : rm -rf $LLAMA_DIR/build and re-run"
+    ok "Binary present : $LLAMA_DIR/build/bin/llama-server"
     return
   fi
 
   if [ ! -d "$LLAMA_DIR" ]; then
-    info "Clone du repo llama.cpp…"
+    info "Cloning the llama.cpp repo..."
     git clone "$LLAMA_REPO" "$LLAMA_DIR"
   else
-    info "Repo déjà présent — pull"
-    (cd "$LLAMA_DIR" && git pull --rebase --autostash) || warn "git pull a échoué — on continue"
+    info "Repo already present — pulling"
+    (cd "$LLAMA_DIR" && git pull --rebase --autostash) || warn "git pull failed — continuing"
   fi
 
-  info "Compilation dans le container (peut prendre 10-20 min)…"
+  info "Building inside the container (can take 10-20 min)..."
   distrobox enter "$CONTAINER_NAME" -- bash -c "
     set -e
     cd $LLAMA_DIR
@@ -273,23 +273,23 @@ build_llama() {
   "
 
   if [ -x "$LLAMA_DIR/build/bin/llama-server" ]; then
-    ok "Compilation réussie"
+    ok "Build succeeded"
   else
-    err "Compilation échouée. Voir la sortie ci-dessus."
+    err "Build failed. See the output above."
     exit 1
   fi
 }
 
-# ---------- Étape 4 : pose des scripts ----------
+# ---------- Step 4 : lay down the scripts ----------
 install_scripts() {
-  step "4. Installation des scripts de la stack"
+  step "4. Installing the stack scripts"
 
   mkdir -p "$LOG_DIR"
 
   # --- preload-models.sh
   cat > "$HOME/preload-models.sh" << 'PRELOAD_EOF'
 #!/bin/bash
-# Précharge les GGUF (vrais blobs) dans le page cache du kernel hôte.
+# Preload the GGUFs (real blobs) into the host kernel page cache.
 set -u
 HF_HUB="$HOME/.cache/huggingface/hub"
 
@@ -305,10 +305,10 @@ FIM=$(resolve_gguf "Qwen2.5-Coder-1.5B-Q8_0.gguf")
 
 preload() {
   if [ -z "$1" ] || [ ! -f "$1" ]; then
-    echo "  ⚠  $2 introuvable"
+    echo "  !! $2 not found"
     return
   fi
-  echo "  → $2 ($(du -h "$1" | cut -f1)) : $1"
+  echo "  -> $2 ($(du -h "$1" | cut -f1)) : $1"
   if command -v vmtouch &>/dev/null; then
     vmtouch -t "$1" >/dev/null 2>&1
   else
@@ -316,23 +316,23 @@ preload() {
   fi
 }
 
-echo "🔥 Préchargement page cache..."
+echo "Preloading page cache..."
 START=$(date +%s)
 preload "$MAIN" "Qwen3.6-35B-A3B"
 preload "$FIM"  "Qwen2.5-Coder-1.5B (FIM)"
-echo "✅ Terminé en $(($(date +%s)-START))s"
+echo "Done in $(($(date +%s)-START))s"
 PRELOAD_EOF
   chmod +x "$HOME/preload-models.sh"
   ok "$HOME/preload-models.sh"
 
-  # --- start-llm.sh (chat, dans la distrobox)
+  # --- start-llm.sh (chat, inside the distrobox)
   cat > "$HOME/start-llm.sh" << 'CHAT_EOF'
 #!/bin/bash
-# Serveur chat principal : Qwen3.6-35B-A3B sur 780M (port 8080)
+# Main chat server : Qwen3.6-35B-A3B on the 780M (port 8080)
 
 export AMD_VULKAN_ICD=RADV
 export RADV_PERFTEST=gpl
-export RADV_DEBUG=zerovram                 # ignore le carve-out VRAM (1 GiB), tout via GTT
+export RADV_DEBUG=zerovram                 # ignore the 1 GiB VRAM carve-out, route everything via GTT
 export GGML_VK_ALLOW_SYSMEM_FALLBACK=1
 export MESA_SHADER_CACHE_DIR="$HOME/.cache/mesa_shader_cache"
 export MESA_SHADER_CACHE_MAX_SIZE="4G"
@@ -363,14 +363,14 @@ CHAT_EOF
   chmod +x "$HOME/start-llm.sh"
   ok "$HOME/start-llm.sh"
 
-  # --- start-llm-fast.sh (FIM, dans la distrobox)
+  # --- start-llm-fast.sh (FIM, inside the distrobox)
   cat > "$HOME/start-llm-fast.sh" << 'FIM_EOF'
 #!/bin/bash
-# Serveur FIM (autocomplétion éditeur) : Qwen2.5-Coder-1.5B sur 780M (port 8081)
+# FIM server (editor autocomplete) : Qwen2.5-Coder-1.5B on the 780M (port 8081)
 
 export AMD_VULKAN_ICD=RADV
 export RADV_PERFTEST=gpl
-export RADV_DEBUG=zerovram                 # ignore le carve-out VRAM (1 GiB), tout via GTT
+export RADV_DEBUG=zerovram                 # ignore the 1 GiB VRAM carve-out, route everything via GTT
 export GGML_VK_ALLOW_SYSMEM_FALLBACK=1
 export MESA_SHADER_CACHE_DIR="$HOME/.cache/mesa_shader_cache"
 export MESA_SHADER_CACHE_MAX_SIZE="4G"
@@ -395,18 +395,18 @@ FIM_EOF
   chmod +x "$HOME/start-llm-fast.sh"
   ok "$HOME/start-llm-fast.sh"
 
-  # --- open-websearch : MCP de recherche web (conteneur podman, sans clé API)
+  # --- open-websearch : web search MCP (podman container, no API key)
   mkdir -p "$HOME/open-websearch"
   cat > "$HOME/open-websearch/docker-compose.yaml" << 'SEARCH_EOF'
-# open-webSearch MCP server — AUCUNE CLÉ API REQUISE
-# Recherche web multi-moteurs (DuckDuckGo, Bing, Brave, ...) pour la WebUI llama.cpp.
+# open-webSearch MCP server — NO API KEY REQUIRED
+# Multi-engine web search (DuckDuckGo, Bing, Brave, ...) for the llama.cpp WebUI.
 #
-# Lancé/arrêté automatiquement par ~/llm-stack.sh (podman compose).
-# Endpoint MCP : http://127.0.0.1:3333/mcp   (streamable HTTP)
-# Fallback SSE : http://127.0.0.1:3333/sse
+# Started/stopped automatically by ~/llm-stack.sh (podman compose).
+# MCP endpoint : http://127.0.0.1:3333/mcp   (streamable HTTP)
+# SSE fallback : http://127.0.0.1:3333/sse
 #
-# ⚠ Le cors-proxy de llama-server est un proxy ouvert (risque SSRF) :
-#    garde la stack sur un réseau de confiance, ne l'expose pas sur Internet.
+# WARNING: llama-server's cors-proxy is an open proxy (SSRF risk):
+#    keep the stack on a trusted network, do not expose it to the internet.
 services:
   open-websearch:
     image: ghcr.io/aas-ee/open-web-search:latest
@@ -419,7 +419,7 @@ services:
       - DEFAULT_SEARCH_ENGINE=duckduckgo
       - ALLOWED_SEARCH_ENGINES=duckduckgo,bing,brave
       - PORT=3000
-      # Proxy sortant si ton réseau en exige un pour joindre les moteurs :
+      # Outbound proxy if your network needs one to reach the engines:
       # - USE_PROXY=true
       # - PROXY_URL=http://your-proxy-host:port
     ports:
@@ -431,10 +431,11 @@ services:
 SEARCH_EOF
   ok "$HOME/open-websearch/docker-compose.yaml"
 
-  # --- llm-stack.sh (orchestrateur hôte)
+  # --- llm-stack.sh (host orchestrator)
   cat > "$HOME/llm-stack.sh" << 'STACK_EOF'
 #!/bin/bash
-# Orchestrateur : précharge sur l'hôte puis lance les 2 serveurs dans distrobox.
+# Orchestrator : preload on the host, then launch the 2 servers in distrobox
+# plus the web-search MCP container.
 set -u
 LOGDIR="$HOME/llm-logs"
 mkdir -p "$LOGDIR"
@@ -447,28 +448,28 @@ SEARCH_COMPOSE="$HOME/open-websearch/docker-compose.yaml"
 cmd="${1:-start}"
 
 stop_all() {
-  echo "⏹  Arrêt des serveurs..."
+  echo "Stopping servers..."
   distrobox enter "$CONTAINER" -- pkill -f "llama-server" 2>/dev/null || true
   sleep 2
   distrobox enter "$CONTAINER" -- pkill -9 -f "llama-server" 2>/dev/null || true
   rm -f "$LOGDIR"/*.pid
-  echo "🔎 Arrêt du MCP de recherche..."
+  echo "Stopping the web-search MCP..."
   podman compose -f "$SEARCH_COMPOSE" down 2>/dev/null || true
-  echo "✅ Arrêté"
+  echo "Stopped"
 }
 
 wait_ready() {
   local port=$1 timeout=$2 label=$3
-  echo -n "    Attente $label (port $port)"
+  echo -n "    Waiting for $label (port $port)"
   for i in $(seq 1 "$timeout"); do
     if curl -sf "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
-      echo " — prêt en ${i}s ✅"
+      echo " — ready in ${i}s"
       return 0
     fi
     echo -n "."
     sleep 1
   done
-  echo " ❌ timeout"
+  echo " timeout"
   return 1
 }
 
@@ -477,72 +478,72 @@ warmup_background() {
     sleep 3
     curl -s -X POST http://127.0.0.1:8080/v1/chat/completions \
       -H 'Content-Type: application/json' \
-      -d '{"model":"qwen3.6-a3b","messages":[{"role":"user","content":"Bonjour"}],"max_tokens":20,"cache_prompt":true}' \
+      -d '{"model":"qwen3.6-a3b","messages":[{"role":"user","content":"Hello"}],"max_tokens":20,"cache_prompt":true}' \
       > "$LOGDIR/warmup.log" 2>&1
   ) &
 }
 
 start_all() {
-  echo "═══ Stack LLM — Qwen3.6-35B + Coder-1.5B FIM + WebSearch MCP ═══"
+  echo "=== LLM stack — Qwen3.6-35B + Coder-1.5B FIM + WebSearch MCP ==="
 
-  echo "📦 [1/5] podman start $CONTAINER"
+  echo "[1/5] podman start $CONTAINER"
   podman start "$CONTAINER" >/dev/null
 
-  echo "🔥 [2/5] Préchargement page cache (hôte)..."
+  echo "[2/5] Preloading page cache (host)..."
   "$HOME/preload-models.sh"
 
-  echo "🧠 [3/5] Qwen3.6-35B sur :8080..."
+  echo "[3/5] Qwen3.6-35B on :8080..."
   nohup distrobox enter "$CONTAINER" -- "$MAIN_SCRIPT" \
     > "$LOGDIR/main.log" 2>&1 &
   echo $! > "$LOGDIR/main.pid"
   wait_ready 8080 180 "chat"
 
-  echo "⚡ [4/5] Coder-1.5B FIM sur :8081..."
+  echo "[4/5] Coder-1.5B FIM on :8081..."
   nohup distrobox enter "$CONTAINER" -- "$FIM_SCRIPT" \
     > "$LOGDIR/fim.log" 2>&1 &
   echo $! > "$LOGDIR/fim.pid"
   wait_ready 8081 60 "FIM"
 
-  echo "🔎 [5/5] open-websearch MCP sur :3333..."
+  echo "[5/5] open-websearch MCP on :3333..."
   if podman compose -f "$SEARCH_COMPOSE" up -d >/dev/null 2>&1; then
     sleep 2
     if podman ps --format '{{.Names}}' | grep -qx "open-websearch"; then
-      echo "    open-websearch — up ✅  (MCP: http://127.0.0.1:3333/mcp)"
+      echo "    open-websearch — up  (MCP: http://127.0.0.1:3333/mcp)"
     else
-      echo "    open-websearch — démarré mais conteneur non visible ⚠ (voir: podman logs open-websearch)"
+      echo "    open-websearch — started but container not visible (see: podman logs open-websearch)"
     fi
   else
-    echo "    open-websearch — échec du démarrage ⚠ (podman compose absent ? voir README)"
+    echo "    open-websearch — failed to start (podman compose missing? see README)"
   fi
 
-  echo "🌡  Warmup lancé en arrière-plan (voir $LOGDIR/warmup.log)"
+  echo "Warmup launched in the background (see $LOGDIR/warmup.log)"
   warmup_background
 
-  echo "═══ Stack prête ═══"
+  echo "=== Stack ready ==="
 }
 
 status() {
-  echo "── Stack status ──"
+  echo "-- Stack status --"
   for port_label in "8080:chat" "8081:fim"; do
     port="${port_label%%:*}"; label="${port_label##*:}"
     if curl -sf "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
-      echo "  ✅ $label : up (port $port)"
+      echo "  up   $label (port $port)"
     else
-      echo "  ❌ $label : down (port $port)"
+      echo "  down $label (port $port)"
     fi
   done
   if podman ps --format '{{.Names}}' | grep -qx "open-websearch"; then
-    echo "  ✅ search : up (port 3333, MCP /mcp)"
+    echo "  up   search (port 3333, MCP /mcp)"
   else
-    echo "  ❌ search : down (port 3333)"
+    echo "  down search (port 3333)"
   fi
 }
 
 logs() {
-  echo "── main.log (20 dernières lignes) ──"
+  echo "-- main.log (last 20 lines) --"
   tail -n 20 "$LOGDIR/main.log" 2>/dev/null
   echo
-  echo "── fim.log (20 dernières lignes) ──"
+  echo "-- fim.log (last 20 lines) --"
   tail -n 20 "$LOGDIR/fim.log" 2>/dev/null
 }
 
@@ -559,11 +560,11 @@ STACK_EOF
   ok "$HOME/llm-stack.sh"
 }
 
-# ---------- Étape 5 : service systemd --user ----------
+# ---------- Step 5 : systemd --user service ----------
 install_service() {
-  step "5. Installation du service systemd --user"
+  step "5. Installing the systemd --user service"
 
-  # Nettoyage d'anciens services s'ils existent
+  # Clean up old services if present
   systemctl --user stop llama-server.service llama-server-fast.service 2>/dev/null
   systemctl --user disable llama-server.service llama-server-fast.service 2>/dev/null
   rm -f "$HOME/.config/systemd/user/llama-server.service" \
@@ -572,7 +573,7 @@ install_service() {
   mkdir -p "$HOME/.config/systemd/user"
   cat > "$HOME/.config/systemd/user/llm-stack.service" << EOF
 [Unit]
-Description=Stack LLM (Qwen3.6-35B + Coder-1.5B FIM + WebSearch MCP dans distrobox/podman)
+Description=LLM stack (Qwen3.6-35B + Coder-1.5B FIM + WebSearch MCP in distrobox/podman)
 After=default.target
 
 [Service]
@@ -590,7 +591,7 @@ EOF
   systemctl --user daemon-reload
   systemctl --user enable llm-stack.service
   sudo loginctl enable-linger "$USER" >/dev/null 2>&1 || true
-  ok "Service llm-stack.service activé (lancement auto au login)"
+  ok "llm-stack.service enabled (auto start at login)"
 }
 
 # =============================================================================
@@ -604,23 +605,23 @@ build_llama
 install_scripts
 install_service
 
-step "Installation terminée"
+step "Installation complete"
 
 if [ -f /tmp/.llm-stack-reboot ]; then
   rm -f /tmp/.llm-stack-reboot
-  warn "Reboot requis pour activer les kargs GTT 48 GiB."
-  warn "Après reboot, lance :   ~/llm-stack.sh start"
+  warn "Reboot required to activate the 48 GiB GTT kargs."
+  warn "After reboot, run :   ~/llm-stack.sh start"
   echo
-  read -rp "Reboote maintenant ? [y/N] " ans
+  read -rp "Reboot now ? [y/N] " ans
   case "$ans" in
     [yY]) sudo systemctl reboot ;;
-    *)    info "Reboote quand tu seras prêt avec : sudo systemctl reboot" ;;
+    *)    info "Reboot when ready with : sudo systemctl reboot" ;;
   esac
 else
-  info "Tu peux maintenant lancer la stack :"
+  info "You can now launch the stack :"
   echo "  ~/llm-stack.sh start"
   echo
-  info "Vérifier l'état :"
+  info "Check the state :"
   echo "  ~/llm-stack.sh status"
   echo "  bash $0 --status"
 fi
