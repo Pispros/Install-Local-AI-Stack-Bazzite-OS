@@ -6,7 +6,8 @@
 #  Cible : UM890 Pro (Ryzen 9 8945HS + Radeon 780M iGPU) — adapte si besoin
 #  Modèles :
 #    - Chat   : Qwen3.6-35B-A3B (UD-Q4_K_XL, ~21 GiB) sur port 8080
-#    - FIM    : Qwen2.5-Coder-3B (Q8_0, ~3 GiB)        sur port 8081
+#    - FIM    : Qwen2.5-Coder-1.5B (Q8_0, ~1.7 GiB)    sur port 8081
+#    - Search : open-websearch MCP (conteneur podman)  sur port 3333
 #
 #  Idempotent : tu peux le relancer autant de fois que tu veux, il ne casse
 #  rien et reprend là où il en est. Chaque étape vérifie l'état avant d'agir.
@@ -103,6 +104,11 @@ show_status() {
   echo -e "${C}Kargs effectifs au boot :${N}"
   cat /proc/cmdline | tr ' ' '\n' | grep -E 'gtt|ttm|amdgpu' | sed 's/^/  /' \
     || echo "  (aucun karg GPU appliqué)"
+
+  echo -e "\n${C}VRAM carve-out (cible des Failed to allocate) :${N}"
+  for f in /sys/class/drm/card*/device/mem_info_vram_total; do
+    [ -f "$f" ] && awk '{printf "  VRAM total : %.0f MiB\n", $1/1048576}' < "$f"
+  done
 
   echo -e "\n${C}GTT exposée par le driver :${N}"
   for f in /sys/class/drm/card*/device/mem_info_gtt_total; do
@@ -295,7 +301,7 @@ resolve_gguf() {
 }
 
 MAIN=$(resolve_gguf "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf")
-FIM=$(resolve_gguf "Qwen2.5-Coder-3B-Q8_0.gguf")
+FIM=$(resolve_gguf "Qwen2.5-Coder-1.5B-Q8_0.gguf")
 
 preload() {
   if [ -z "$1" ] || [ ! -f "$1" ]; then
@@ -313,7 +319,7 @@ preload() {
 echo "🔥 Préchargement page cache..."
 START=$(date +%s)
 preload "$MAIN" "Qwen3.6-35B-A3B"
-preload "$FIM"  "Qwen2.5-Coder-3B (FIM)"
+preload "$FIM"  "Qwen2.5-Coder-1.5B (FIM)"
 echo "✅ Terminé en $(($(date +%s)-START))s"
 PRELOAD_EOF
   chmod +x "$HOME/preload-models.sh"
@@ -326,6 +332,7 @@ PRELOAD_EOF
 
 export AMD_VULKAN_ICD=RADV
 export RADV_PERFTEST=gpl
+export RADV_DEBUG=zerovram                 # ignore le carve-out VRAM (1 GiB), tout via GTT
 export GGML_VK_ALLOW_SYSMEM_FALLBACK=1
 export MESA_SHADER_CACHE_DIR="$HOME/.cache/mesa_shader_cache"
 export MESA_SHADER_CACHE_MAX_SIZE="4G"
@@ -339,19 +346,19 @@ exec "$HOME/llama.cpp/build/bin/llama-server" \
   --no-mmproj \
   --alias qwen3.6-a3b \
   -ngl 99 \
-  --ctx-size 65536 \
+  --ctx-size 138240 \
   --parallel 1 \
   -fa on \
   --cache-type-k q8_0 --cache-type-v q8_0 \
   -b 2048 -ub 1024 \
   --threads 8 --threads-batch 8 \
-  --no-mmap --mlock --no-warmup \
+  --no-warmup \
   --host 0.0.0.0 --port 8080 \
   --jinja --reasoning-format deepseek \
   --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 \
   --presence-penalty 1.5 \
   --chat-template-kwargs '{"enable_thinking":false}' \
-  --webui-mcp-proxy
+  --ui-mcp-proxy
 CHAT_EOF
   chmod +x "$HOME/start-llm.sh"
   ok "$HOME/start-llm.sh"
@@ -359,10 +366,11 @@ CHAT_EOF
   # --- start-llm-fast.sh (FIM, dans la distrobox)
   cat > "$HOME/start-llm-fast.sh" << 'FIM_EOF'
 #!/bin/bash
-# Serveur FIM (autocomplétion éditeur) : Qwen2.5-Coder-3B sur 780M (port 8081)
+# Serveur FIM (autocomplétion éditeur) : Qwen2.5-Coder-1.5B sur 780M (port 8081)
 
 export AMD_VULKAN_ICD=RADV
 export RADV_PERFTEST=gpl
+export RADV_DEBUG=zerovram                 # ignore le carve-out VRAM (1 GiB), tout via GTT
 export GGML_VK_ALLOW_SYSMEM_FALLBACK=1
 export MESA_SHADER_CACHE_DIR="$HOME/.cache/mesa_shader_cache"
 export MESA_SHADER_CACHE_MAX_SIZE="4G"
@@ -371,7 +379,7 @@ export GOMP_CPU_AFFINITY="8-11"
 mkdir -p "$MESA_SHADER_CACHE_DIR"
 
 exec "$HOME/llama.cpp/build/bin/llama-server" \
-  -hf ggml-org/Qwen2.5-Coder-3B-Q8_0-GGUF \
+  -hf ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF \
   --alias qwen-coder-fim \
   -ngl 99 \
   --ctx-size 8192 \
@@ -380,12 +388,48 @@ exec "$HOME/llama.cpp/build/bin/llama-server" \
   --cache-reuse 256 \
   -b 1024 -ub 1024 \
   --threads 4 --threads-batch 4 \
-  --no-mmap --mlock --no-warmup \
+  --no-warmup \
   --host 0.0.0.0 --port 8081 \
   --temp 0.1 --top-p 0.9
 FIM_EOF
   chmod +x "$HOME/start-llm-fast.sh"
   ok "$HOME/start-llm-fast.sh"
+
+  # --- open-websearch : MCP de recherche web (conteneur podman, sans clé API)
+  mkdir -p "$HOME/open-websearch"
+  cat > "$HOME/open-websearch/docker-compose.yaml" << 'SEARCH_EOF'
+# open-webSearch MCP server — AUCUNE CLÉ API REQUISE
+# Recherche web multi-moteurs (DuckDuckGo, Bing, Brave, ...) pour la WebUI llama.cpp.
+#
+# Lancé/arrêté automatiquement par ~/llm-stack.sh (podman compose).
+# Endpoint MCP : http://127.0.0.1:3333/mcp   (streamable HTTP)
+# Fallback SSE : http://127.0.0.1:3333/sse
+#
+# ⚠ Le cors-proxy de llama-server est un proxy ouvert (risque SSRF) :
+#    garde la stack sur un réseau de confiance, ne l'expose pas sur Internet.
+services:
+  open-websearch:
+    image: ghcr.io/aas-ee/open-web-search:latest
+    container_name: open-websearch
+    restart: unless-stopped
+    init: true
+    environment:
+      - ENABLE_CORS=true
+      - CORS_ORIGIN=*
+      - DEFAULT_SEARCH_ENGINE=duckduckgo
+      - ALLOWED_SEARCH_ENGINES=duckduckgo,bing,brave
+      - PORT=3000
+      # Proxy sortant si ton réseau en exige un pour joindre les moteurs :
+      # - USE_PROXY=true
+      # - PROXY_URL=http://your-proxy-host:port
+    ports:
+      - "3333:3000"   # host:container
+    deploy:
+      restart_policy:
+        condition: any
+        delay: 5s
+SEARCH_EOF
+  ok "$HOME/open-websearch/docker-compose.yaml"
 
   # --- llm-stack.sh (orchestrateur hôte)
   cat > "$HOME/llm-stack.sh" << 'STACK_EOF'
@@ -398,6 +442,7 @@ mkdir -p "$LOGDIR"
 CONTAINER="llm"
 MAIN_SCRIPT="$HOME/start-llm.sh"
 FIM_SCRIPT="$HOME/start-llm-fast.sh"
+SEARCH_COMPOSE="$HOME/open-websearch/docker-compose.yaml"
 
 cmd="${1:-start}"
 
@@ -407,6 +452,8 @@ stop_all() {
   sleep 2
   distrobox enter "$CONTAINER" -- pkill -9 -f "llama-server" 2>/dev/null || true
   rm -f "$LOGDIR"/*.pid
+  echo "🔎 Arrêt du MCP de recherche..."
+  podman compose -f "$SEARCH_COMPOSE" down 2>/dev/null || true
   echo "✅ Arrêté"
 }
 
@@ -436,25 +483,37 @@ warmup_background() {
 }
 
 start_all() {
-  echo "═══ Stack LLM — Qwen3.6-35B + Coder-3B FIM ═══"
+  echo "═══ Stack LLM — Qwen3.6-35B + Coder-1.5B FIM + WebSearch MCP ═══"
 
-  echo "📦 [1/4] podman start $CONTAINER"
+  echo "📦 [1/5] podman start $CONTAINER"
   podman start "$CONTAINER" >/dev/null
 
-  echo "🔥 [2/4] Préchargement page cache (hôte)..."
+  echo "🔥 [2/5] Préchargement page cache (hôte)..."
   "$HOME/preload-models.sh"
 
-  echo "🧠 [3/4] Qwen3.6-35B sur :8080..."
+  echo "🧠 [3/5] Qwen3.6-35B sur :8080..."
   nohup distrobox enter "$CONTAINER" -- "$MAIN_SCRIPT" \
     > "$LOGDIR/main.log" 2>&1 &
   echo $! > "$LOGDIR/main.pid"
   wait_ready 8080 180 "chat"
 
-  echo "⚡ [4/4] Coder-3B FIM sur :8081..."
+  echo "⚡ [4/5] Coder-1.5B FIM sur :8081..."
   nohup distrobox enter "$CONTAINER" -- "$FIM_SCRIPT" \
     > "$LOGDIR/fim.log" 2>&1 &
   echo $! > "$LOGDIR/fim.pid"
   wait_ready 8081 60 "FIM"
+
+  echo "🔎 [5/5] open-websearch MCP sur :3333..."
+  if podman compose -f "$SEARCH_COMPOSE" up -d >/dev/null 2>&1; then
+    sleep 2
+    if podman ps --format '{{.Names}}' | grep -qx "open-websearch"; then
+      echo "    open-websearch — up ✅  (MCP: http://127.0.0.1:3333/mcp)"
+    else
+      echo "    open-websearch — démarré mais conteneur non visible ⚠ (voir: podman logs open-websearch)"
+    fi
+  else
+    echo "    open-websearch — échec du démarrage ⚠ (podman compose absent ? voir README)"
+  fi
 
   echo "🌡  Warmup lancé en arrière-plan (voir $LOGDIR/warmup.log)"
   warmup_background
@@ -472,6 +531,11 @@ status() {
       echo "  ❌ $label : down (port $port)"
     fi
   done
+  if podman ps --format '{{.Names}}' | grep -qx "open-websearch"; then
+    echo "  ✅ search : up (port 3333, MCP /mcp)"
+  else
+    echo "  ❌ search : down (port 3333)"
+  fi
 }
 
 logs() {
@@ -508,7 +572,7 @@ install_service() {
   mkdir -p "$HOME/.config/systemd/user"
   cat > "$HOME/.config/systemd/user/llm-stack.service" << EOF
 [Unit]
-Description=Stack LLM (Qwen3.6-35B + Coder-3B FIM dans distrobox)
+Description=Stack LLM (Qwen3.6-35B + Coder-1.5B FIM + WebSearch MCP dans distrobox/podman)
 After=default.target
 
 [Service]
