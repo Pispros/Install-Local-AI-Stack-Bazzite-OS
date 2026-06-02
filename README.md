@@ -2,12 +2,15 @@
 
 Installation tout-en-un d'une stack LLM locale sur **Bazzite OS** avec le iGPU **Radeon 780M** (Ryzen 9 8945HS), via une **distrobox Fedora** qui compile `llama.cpp` avec Vulkan.
 
-Deux serveurs tournent en parallèle :
+Deux serveurs LLM tournent en parallèle dans la distrobox, plus un conteneur podman dédié à la recherche web :
 
-| Service | Modèle                          | Port | Usage             |
+| Service | Modèle / Image                  | Port | Usage             |
 |---------|---------------------------------|------|-------------------|
 | Chat    | Qwen3.6-35B-A3B (UD-Q4_K_XL)    | 8080 | Conversation, MCP |
-| FIM     | Qwen2.5-Coder-3B (Q8_0)         | 8081 | Autocomplétion IDE |
+| FIM     | Qwen2.5-Coder-1.5B (Q8_0)       | 8081 | Autocomplétion IDE |
+| Search  | open-websearch (MCP)            | 3333 | Recherche web pour la WebUI |
+
+> **Note sur le FIM** : on utilise le **1.5B** et non le 3B. Pour de l'autocomplétion, la contrainte est la latence (la suggestion doit arriver avant que tu tapes le caractère suivant). Sur le 780M, qui est limité par la bande passante mémoire, un 1.5B (~1.7 GiB à relire par token) est ~2× plus rapide qu'un 3B (~3,3 GiB) pour une qualité encore très correcte ligne par ligne. C'est aussi la taille recommandée par les plugins officiels llama.vim/llama.vscode pour une config < 8 GiB de VRAM. Si tu veux encore plus réactif, passe au `Qwen2.5-Coder-0.5B-Q8_0-GGUF` ; si tu veux plus de qualité et que la latence te convient, remonte au 3B.
 
 ---
 
@@ -37,14 +40,15 @@ Le script est **idempotent** : tu peux le relancer autant de fois que tu veux. �
    - `preload-models.sh` — précharge les GGUF dans le page cache (warm cache → premier prompt rapide)
    - `start-llm.sh` — lance le serveur chat dans la distrobox
    - `start-llm-fast.sh` — lance le serveur FIM dans la distrobox
-   - `llm-stack.sh` — orchestrateur central
+   - `open-websearch/docker-compose.yaml` — le MCP de recherche web (conteneur podman)
+   - `llm-stack.sh` — orchestrateur central (lance/arrête les 2 serveurs **et** le MCP de recherche)
 6. **Service systemd** — installe `llm-stack.service` (`--user`) pour démarrage auto au login
 
 ---
 
 ## La GTT (Graphics Translation Table) en pratique
 
-Le iGPU 780M n'a que **1 GiB de VRAM dédiée**. Pour faire tenir un modèle de 21 GiB, il faut élargir la **GTT**, qui mappe de la RAM système comme mémoire GPU. Sur Bazzite (immuable, basé `rpm-ostree`), ça se fait par **kargs** au boot.
+Le iGPU 780M n'a que **1 GiB de VRAM dédiée** (le *carve-out*). Pour faire tenir un modèle de 21 GiB, il faut élargir la **GTT**, qui mappe de la RAM système comme mémoire GPU. Sur Bazzite (immuable, basé `rpm-ostree`), ça se fait par **kargs** au boot.
 
 ### Valeurs appliquées
 
@@ -58,11 +62,11 @@ Le script pose trois kernel arguments :
 
 ### Pourquoi 48 GiB sur 64 GiB de RAM ?
 
-- **Modèles chargés** : 21 GiB (chat) + 3 GiB (FIM) + KV cache ≈ 30 GiB
-- **Marge GTT** : 48 − 30 = 18 GiB pour les pics
-- **Réservé au système** : 64 − 48 = 16 GiB pour le kernel, le DE, les apps, Steam, le page cache
+- **Modèles chargés** : 21 GiB (chat) + 1,7 GiB (FIM) + KV cache. Le KV cache du chat est lourd à `--ctx-size 138240` (q8_0), donc compte une enveloppe globale de l'ordre de **35–40 GiB** une fois le contexte rempli.
+- **Marge GTT** : ce qui reste sous 48 GiB sert aux pics d'allocation.
+- **Réservé au système** : 64 − 48 = 16 GiB pour le kernel, le DE, les apps, Steam, le page cache.
 
-Steam peut utiliser jusqu'à ~30 GiB en pratique pendant un jeu si tu arrêtes la stack LLM (`~/llm-stack.sh stop` libère les ~25 GiB des modèles).
+Steam peut utiliser une grosse part de la RAM pendant un jeu si tu arrêtes la stack LLM (`~/llm-stack.sh stop` libère les modèles et leur KV cache).
 
 ### Vérifier la GTT effective
 
@@ -107,13 +111,97 @@ sudo systemctl reboot
 
 ---
 
+## Le carve-out VRAM et `RADV_DEBUG=zerovram`
+
+Symptôme historique de cette machine : des performances **instables** (« parfois rapide, parfois ultra lent », sans rapport avec le cold start), et dans les logs de bench des lignes `Failed to allocate ... domains: 2/4`.
+
+**Cause** : le carve-out VRAM du 780M ne fait que **1 GiB**. RADV tente d'allouer des buffers de compute (jusqu'à ~1 GiB) dans cette zone, échoue dès qu'elle est pleine, et retombe sur un fallback sysmem au comportement irrégulier — d'où la variance énorme du débit.
+
+**Correctif** : `RADV_DEBUG=zerovram` dit à RADV d'ignorer ce carve-out d'1 GiB (inutile sur une archi UMA) et de tout router via le **GTT**. Comme VRAM et GTT pointent vers la même RAM physique à la même vitesse, on ne perd rien — on supprime juste le goulot d'allocation. Cette variable est posée dans `start-llm.sh` **et** `start-llm-fast.sh`.
+
+Pour vérifier la taille du carve-out :
+
+```bash
+for d in /sys/class/drm/card*/device/mem_info_vram_total; do
+  echo "$d : $(awk '{print $1/1048576 " MiB"}' "$d" 2>/dev/null)"
+done
+# Attendu : 1024 MiB  (c'est normal, zerovram s'en occupe)
+```
+
+Si jamais `zerovram` ne suffisait pas (rare), le plan B est d'agrandir le carve-out dans le **BIOS** (« UMA Frame Buffer Size » / « iGPU Memory », mode `UMA_SPECIFIED`) à 4 ou 8 GiB. Mais ça immobilise d'autant la RAM en permanence, alors que `zerovram` est gratuit et réversible — d'où le choix de `zerovram` par défaut.
+
+---
+
+## Mémoire : pas de `--no-mmap --mlock`
+
+Les scripts de lancement **n'utilisent volontairement pas** `--no-mmap` ni `--mlock`.
+
+- `--no-mmap` charge tout le modèle en RAM non réclamable au lieu de le mapper depuis le disque.
+- `--mlock` verrouille cette mémoire pour interdire à Linux de l'évincer.
+
+Sur cette archi UMA où le modèle + le KV cache vivent déjà tous en RAM (via le GTT), ces deux options poussent vite à la saturation et au **swap**, qui est *la* cause des ralentissements monstrueux. En laissant `mmap` actif, une grosse part du modèle reste en `buff/cache` réclamable et Linux garde sa marge de manœuvre.
+
+### Le seul critère qui compte : le swap
+
+Une RAM « pleine » n'est **pas** un problème en soi (le `buff/cache` est réclamable). Ce qui compte, c'est que le swap reste à zéro. Pendant un run, dans un autre terminal :
+
+```bash
+watch -n1 free -h
+```
+
+- `Swap used` à **0** → tout va bien, même si `Mem used` paraît énorme.
+- `Swap used` qui monte → réduis `--ctx-size`, ou allège la charge.
+
+Repère validé sur cette machine à `--ctx-size 138240` : `Swap used` ≈ 0, `available` ≈ 27 GiB. Si tu remontes le contexte au-delà, resurveille le swap.
+
+---
+
+## Recherche web via MCP (open-websearch)
+
+La WebUI intégrée de llama.cpp peut appeler des outils externes exposés en **MCP**. On utilise ici **open-websearch**, un serveur MCP multi-moteurs (DuckDuckGo, Bing, Brave…) **sans clé API**, lancé dans son propre conteneur podman sur le port **3333**.
+
+> Le MCP de recherche **ne remplace pas** la WebUI : il se branche *dedans*. Le navigateur (WebUI) atteint le MCP en passant par le **cors-proxy** de llama-server, ce qui évite les soucis de CORS. C'est pour ça que `start-llm.sh` lance le serveur chat avec `--ui-mcp-proxy`.
+
+### Le flag a changé de nom
+
+`--webui-mcp-proxy` est **déprécié** ; le nom courant est **`--ui-mcp-proxy`** (l'ancien reste accepté comme alias). Le script utilise déjà le nouveau. Variable d'env équivalente : `LLAMA_ARG_UI_MCP_PROXY=1`.
+
+### Démarrer le MCP
+
+Il est lancé automatiquement par `~/llm-stack.sh start`. Manuellement :
+
+```bash
+podman compose -f ~/open-websearch/docker-compose.yaml up -d
+podman compose -f ~/open-websearch/docker-compose.yaml logs -f   # vérifier
+curl http://127.0.0.1:3333/mcp                                   # doit répondre
+```
+
+> Si `podman compose` n'est pas disponible, installe le plugin : `pip install --user podman-compose` (puis `podman-compose ...`), ou utilise `docker compose` si Docker est présent. Le fichier compose est identique.
+
+### Connecter le MCP dans la WebUI
+
+1. Ouvre la WebUI : `http://127.0.0.1:8080` (serveur chat).
+2. Réglages → MCP → ajoute un serveur avec l'URL `http://127.0.0.1:3333/mcp`, puis **SAUVEGARDE**.
+3. **Rouvre** la connexion via l'**icône crayon** (edit) — c'est seulement à l'édition qu'apparaît le bouton **« use llama-server proxy »**. Active-le.
+4. Les outils de recherche apparaissent alors dans la WebUI ; le modèle peut les appeler (le chat tourne avec `tools: true`).
+
+### Sécurité
+
+Le cors-proxy de llama-server est un **proxy ouvert** (risque de SSRF) et l'option est expérimentale — **à ne pas exposer sur Internet**. Garde la stack sur ton LAN de confiance. Si tu ajoutes une `--api-key`, sache qu'un bug connu fait que la WebUI n'injecte pas la clé dans les requêtes `/cors-proxy` (les connexions MCP échouent en 401) — préfère donc, pour l'instant, ne pas combiner clé API et proxy MCP, ou vérifie que c'est corrigé dans ta version.
+
+### Réseau (distrobox ↔ conteneur search)
+
+Le fetch MCP part de llama-server (dans la distrobox) vers `127.0.0.1:3333`. distrobox partage le réseau de l'hôte, et le conteneur open-websearch mappe `3333` sur l'hôte, donc `127.0.0.1:3333` est joignable des deux côtés. Si un jour tu isoles le réseau de la distrobox, remplace `127.0.0.1` par l'IP LAN de la machine dans l'URL MCP.
+
+---
+
 ## Utilisation quotidienne
 
 ```bash
 ~/llm-stack.sh start      # démarre les deux serveurs (+ warmup)
 ~/llm-stack.sh stop       # tue les deux serveurs
 ~/llm-stack.sh restart    # stop + start
-~/llm-stack.sh status     # ping /health sur 8080 et 8081
+~/llm-stack.sh status     # ping /health sur 8080 et 8081, + état du conteneur search
 ~/llm-stack.sh logs       # tail des deux logs
 
 # Via systemd
@@ -143,6 +231,24 @@ curl -s http://127.0.0.1:8081/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen-coder-fim","prompt":"def fib(n):\n    if n < 2:\n        return n\n    return ","max_tokens":20}'
 ```
+
+### Config côté éditeur
+
+Le serveur expose un alias stable (`qwen3.6-a3b` pour le chat, `qwen-coder-fim` pour le FIM), donc la config client ne change pas même si tu remplaces le modèle sous-jacent. Pense juste à aligner le `max_tokens` du client sur le `--ctx-size` du serveur (138240 pour le chat).
+
+```json
+"edit_predictions": {
+  "provider": "open_ai_compatible_api",
+  "open_ai_compatible_api": {
+    "api_url": "http://192.168.0.190:8081/v1/completions",
+    "model": "qwen-coder-fim",
+    "prompt_format": "qwen",
+    "max_output_tokens": 256
+  }
+}
+```
+
+> L'IP `192.168.0.190` est codée en dur — fige-la (réservation DHCP ou IP statique) sinon l'autocomplétion casse au prochain bail. Si l'éditeur tourne sur la même machine que les serveurs, `127.0.0.1` est plus robuste.
 
 ---
 
@@ -207,7 +313,7 @@ distrobox enter llm -- bash -c 'cd ~/llama.cpp && rm -rf build && cmake -B build
 ~/llm-stack.sh restart
 ```
 
-Le modèle sera téléchargé automatiquement par llama.cpp depuis Hugging Face au premier lancement.
+Le modèle sera téléchargé automatiquement par llama.cpp depuis Hugging Face au premier lancement. Si tu changes le modèle FIM, pense à ajuster aussi le pattern dans `~/preload-models.sh`.
 
 ---
 
@@ -231,12 +337,27 @@ Le serveur n'écoute pas. Vérifier dans l'ordre :
 2. Le port est-il bind ? `ss -tlnp | grep -E '8080|8081'`
 3. Que dit le log ? `tail -n 40 ~/llm-logs/fim.log`
 
+### `Failed to allocate ... domains: 2/4` et débit instable
+
+C'est le symptôme du carve-out VRAM d'1 GiB (voir section dédiée). Vérifie que `RADV_DEBUG=zerovram` est bien présent dans le script de lancement :
+
+```bash
+distrobox enter llm -- env | grep RADV_DEBUG    # doit afficher zerovram
+grep RADV_DEBUG ~/start-llm.sh ~/start-llm-fast.sh
+```
+
+Si la variable est absente, ajoute `export RADV_DEBUG=zerovram` sous `RADV_PERFTEST=gpl` et relance.
+
+### Lenteur / la machine rame, RAM pleine
+
+Vérifie le **swap**, pas la RAM (voir section « Mémoire »). `free -h` : tant que `Swap used` est à 0, la RAM pleine est normale. Si le swap monte, réduis `--ctx-size` côté chat, et assure-toi que `--no-mmap --mlock` n'a pas été réintroduit dans les scripts.
+
 ### `Préchargement... introuvable`
 
 Le `find` ne trouve pas le GGUF. Vérifier :
 
 ```bash
-find ~/.cache/huggingface/hub -iname '*qwen*coder*3b*q8*' 2>/dev/null
+find ~/.cache/huggingface/hub -iname '*qwen*coder*1.5b*q8*' 2>/dev/null
 find ~/.cache/huggingface/hub -iname '*qwen3.6-35b*' 2>/dev/null
 ```
 
@@ -282,21 +403,24 @@ distrobox enter llm -- env | grep -E 'AMD_VULKAN|RADV'
 │  │  1. preload-models.sh  ← page cache GGUF            │  │
 │  │  2. distrobox enter llm -- start-llm.sh    (8080)   │  │
 │  │  3. distrobox enter llm -- start-llm-fast.sh (8081) │  │
+│  │  4. podman compose up open-websearch       (3333)   │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                                                            │
 │  ~/.config/systemd/user/llm-stack.service                 │
 │       └─ ExecStart=~/llm-stack.sh start (auto au login)   │
 │                                                            │
 │  Kargs : ttm.pages_limit / amdgpu.gttsize = 48 GiB        │
-└─────────────────────────────┬──────────────────────────────┘
-                              │
-                              ▼  (podman + distrobox)
-┌───────────────────────────────────────────────────────────┐
-│  Container 'llm' (fedora-toolbox:41)                      │
-│    - /dev/dri, /dev/kfd montés                            │
-│    - ~/llama.cpp/build/bin/llama-server (Vulkan)          │
-│    - vulkan-loader, mesa RADV → 780M                      │
-└───────────────────────────────────────────────────────────┘
+│  RADV_DEBUG=zerovram → tout via GTT (carve-out 1 GiB ignoré) │
+└──────────────┬───────────────────────────┬─────────────────┘
+               │ (podman + distrobox)       │ (podman)
+               ▼                            ▼
+┌──────────────────────────────────┐  ┌──────────────────────────┐
+│  Container 'llm' (fedora-toolbox) │  │  open-websearch (MCP)    │
+│   - /dev/dri, /dev/kfd montés    │  │   :3333  /mcp  /sse      │
+│   - llama-server (Vulkan) → 780M │◀─┤   DuckDuckGo/Bing/Brave  │
+│   - chat :8080  +  FIM :8081     │  │   (via cors-proxy WebUI) │
+│   - --ui-mcp-proxy (chat)        │  └──────────────────────────┘
+└──────────────────────────────────┘
 ```
 
 Le container partage le `$HOME` avec l'hôte, donc les scripts dans `~/` sont accessibles des deux côtés sans recopie.
