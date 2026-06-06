@@ -1,5 +1,5 @@
 #!/bin/bash
-# Serveur FIM (autocompletion) : Qwen2.5-Coder-1.5B sur Radeon 780M (Vulkan/RADV)
+# Serveur FIM (autocompletion) : Qwen2.5-Coder-1.5B base sur Radeon 780M (Vulkan/RADV), port 8081
 export AMD_VULKAN_ICD=RADV
 export RADV_PERFTEST=gpl
 export RADV_DEBUG=zerovram
@@ -9,6 +9,7 @@ export MESA_SHADER_CACHE_MAX_SIZE="4G"
 export OMP_NUM_THREADS=4
 export GOMP_CPU_AFFINITY="8-11"
 mkdir -p "$MESA_SHADER_CACHE_DIR"
+
 exec /home/NJMER/llama.cpp/build/bin/llama-server \
   -hf ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF \
   --alias qwen-coder-fim \
