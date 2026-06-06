@@ -1,0 +1,41 @@
+# open-webSearch MCP server — AUCUNE CLÉ API REQUISE
+# Recherche web multi-moteurs (DuckDuckGo, Bing, Brave, Baidu, ...) pour la WebUI llama.cpp.
+#
+# 1. Lancer :        podman compose up -d        (ou docker compose up -d)
+# 2. Vérifier :      podman compose logs -f       puis  curl http://localhost:3333/mcp
+# 3. Endpoint MCP :  http://<host>:3333/mcp        (streamable HTTP)
+#    Fallback SSE :  http://<host>:3333/sse
+#
+# Connexion dans la WebUI llama.cpp :
+#   - ajoute l'URL /mcp comme serveur MCP, puis SAUVEGARDE
+#   - rouvre-la via l'icône crayon (edit) et active "use llama-server proxy"
+#   - démarre llama-server avec --ui-mcp-proxy   (déjà fait dans start-llm.sh)
+#
+# ⚠ Sécurité : le cors-proxy de llama-server est un proxy ouvert (risque SSRF).
+#   Ne l'expose pas sur Internet — garde la stack sur un réseau de confiance.
+services:
+  open-websearch:
+    image: ghcr.io/aas-ee/open-web-search:latest
+    container_name: open-websearch
+    restart: unless-stopped
+    init: true
+    environment:
+      # CORS activé car la WebUI est un client navigateur.
+      - ENABLE_CORS=true
+      - CORS_ORIGIN=*
+      # Moteur par défaut. Options : duckduckgo, bing, brave, baidu.
+      - DEFAULT_SEARCH_ENGINE=duckduckgo
+      # Moteurs autorisés (séparés par des virgules).
+      - ALLOWED_SEARCH_ENGINES=duckduckgo,bing,brave
+      # Port INTERNE au conteneur (garde-le en phase avec "ports:").
+      - PORT=3000
+      # Si ton réseau exige un proxy sortant pour joindre les moteurs :
+      # - USE_PROXY=true
+      # - PROXY_URL=http://your-proxy-host:port
+    ports:
+      # host:container
+      - "3333:3000"
+    deploy:
+      restart_policy:
+        condition: any
+        delay: 5s
