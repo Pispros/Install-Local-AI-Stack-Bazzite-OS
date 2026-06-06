@@ -4,11 +4,13 @@ All-in-one install of a local LLM stack on **Bazzite OS** using the **Radeon 780
 
 Two LLM servers run in parallel inside the distrobox, plus a dedicated podman container for web search:
 
-| Service | Model / Image                   | Port | Use                         |
-|---------|---------------------------------|------|-----------------------------|
-| Chat    | Qwen3.6-35B-A3B (UD-Q4_K_XL)    | 8080 | Conversation, MCP           |
-| FIM     | Qwen2.5-Coder-1.5B (Q8_0)       | 8081 | IDE autocomplete            |
-| Search  | open-websearch (MCP)            | 3333 | Web search for the WebUI    |
+| Service | Model / Image                     | Port | Use                       |
+|---------|-----------------------------------|------|---------------------------|
+| Chat    | Qwen3-30B-A3B (UD-Q4_K_XL)        | 8080 | Conversation, MCP         |
+| FIM     | Qwen2.5-Coder-1.5B (Q8_0)         | 8081 | IDE autocomplete          |
+| Search  | open-websearch (MCP)              | 3333 | Web search for the WebUI  |
+
+> **Why Qwen3-30B-A3B and not Qwen3.6-35B-A3B?** The 3.6/3.5 "A3B" models use a **hybrid GatedDeltaNet attention** (linear attention + recurrent state). On `llama.cpp` that **breaks KV-cache reuse**: the backend silently disables prefix reuse and **re-processes the whole prompt on every request**, which kills multi-turn latency (each follow-up re-reads the full system prompt + history). Qwen3-30B-A3B uses **standard full attention**, so the cache is reused — in the logs you see `selected slot by LCP similarity, sim_best = 0.9xx`, and follow-ups only pay for the delta. That single change is what fixed the "slow follow-ups" problem; the throughput drop that remains as context grows is pure memory bandwidth, not a broken cache.
 
 > **Note on FIM**: we use the **1.5B**, not the 3B. For autocomplete the binding constraint is latency (the suggestion must land before you type the next character). On the 780M, which is memory-bandwidth bound, a 1.5B (~1.7 GiB to re-read per token) is ~2x faster than a 3B (~3.3 GiB) for still-decent line-by-line quality. It's also the size recommended by the official llama.vim/llama.vscode plugins for a < 8 GiB VRAM setup. Want it even snappier, go to `Qwen2.5-Coder-0.5B-Q8_0-GGUF`; want more quality and the latency is fine, go back up to the 3B.
 
@@ -41,14 +43,64 @@ The script is **idempotent**: re-run it as many times as you like. Each step che
    - `start-llm.sh` — launches the chat server in the distrobox
    - `start-llm-fast.sh` — launches the FIM server in the distrobox
    - `open-websearch/docker-compose.yaml` — the web-search MCP (podman container)
-   - `llm-stack.sh` — central orchestrator (starts/stops both servers **and** the search MCP)
+   - `llm-stack.sh` — central orchestrator (starts/stops both servers **and** the search MCP, then runs the warmup)
 6. **systemd service** — installs `llm-stack.service` (`--user`) for auto start at login
+
+---
+
+## Thinking mode (chat)
+
+Qwen3-30B-A3B is a **hybrid thinking model**: most of its real intelligence on non-trivial tasks (code, multi-step reasoning) lives *inside* the `<think>` trace it emits before answering. **Disabling thinking makes it noticeably dumber.**
+
+- **Default here: thinking ON.** `start-llm.sh` carries **no** `--reasoning-budget` flag, so the server default (`-1` = unlimited) applies. Do **not** pass `--reasoning off` (it disables thinking; the log will show `init: chat template, thinking = 0`).
+- **Verify the state**: in `~/llm-logs/main.log` after load, look for `init: chat template, thinking = 1`. In the WebUI, a "Thinking" block before the answer means it's active.
+- **Per-request control**: because no budget is fixed on the command line, you can drive it per call with `"thinking_budget_tokens": N` in the request body (only works when no server-side budget is set).
+- **Latency knob**: thinking adds generated tokens, and on this bandwidth-bound iGPU generation slows as context grows (see Memory). If responses drag, **don't** turn thinking off — **cap** it: add `--reasoning-budget 4096` (generous; avoid very tight budgets, they can hurt quality more than they help).
+
+### Sampling (must match the mode)
+
+The script uses Qwen's official **thinking-mode** sampling:
+
+```
+--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0
+```
+
+Do **not** reuse the non-thinking profile (`--temp 0.7 --top-p 0.8`) with thinking on, and **do not** set a high `--presence-penalty` (e.g. 1.5): it makes the model avoid tokens it should produce and degrades answers. Presence penalty is left at the default (0). If you ever switch to non-thinking, use `--temp 0.7 --top-p 0.8`.
+
+---
+
+## Context size (`--ctx-size 138240`) and the model cap
+
+The chat server is launched with `--ctx-size 138240`.
+
+> **Important — this model caps at 40960.** Qwen3-30B-A3B's native trained context (`max_position_embeddings`) is **40960** tokens. `llama.cpp` therefore **caps the slot to the training context**: in `main.log` you'll see
+> `the slot context (138240) exceeds the training context of the model (40960) - capping`, then `new slot, n_ctx = 40960`.
+> So with the default flags, the effective context is **40960** regardless of the `138240` you ask for, and the KV cache is allocated for 40960 (not 138240) — which is also why setting 138240 is cheap here, it doesn't reserve a 7 GiB buffer.
+
+### To actually use more than 40960 (YaRN)
+
+If you genuinely need long context, enable RoPE scaling explicitly:
+
+```
+-c 131072 --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768
+```
+
+Caveat (Qwen's own guidance): **static YaRN degrades short-context quality** (occasional looping, weaker reasoning). Enable it only when you actually need the long window — ideally on a **second instance** on another port for "big context" sessions, leaving the main one at native 40960. On this iGPU the prefill of a full long context is also very slow (tens of seconds to minutes), so prefer the agent strategies below over brute-forcing context.
+
+### Handling many / large files without a giant window
+
+For "read dozens of files" or files of 2000+ lines (one such file is already ~15-25k tokens), don't stuff the window:
+- Let the editor's agent **search the codebase on the fly** (grep/regex) and read only what's relevant, instead of @-mentioning everything.
+- @-mention **symbols** or selections, not whole large files.
+- Use **subagents** (separate context windows) to investigate, returning only a summary to the main thread.
+- Start a fresh thread per task so history doesn't accumulate.
+- For genuinely huge one-shot jobs, point the editor at a **cloud provider** for that task and keep the local model for fast inline work.
 
 ---
 
 ## The GTT (Graphics Translation Table) in practice
 
-The 780M iGPU only has **1 GiB of dedicated VRAM** (the *carve-out*). To fit a 21 GiB model you have to widen the **GTT**, which maps system RAM as GPU memory. On Bazzite (immutable, `rpm-ostree`-based) this is done via boot **kargs**.
+The 780M iGPU only has **1 GiB of dedicated VRAM** (the *carve-out*). To fit an ~18 GiB model you have to widen the **GTT**, which maps system RAM as GPU memory. On Bazzite (immutable, `rpm-ostree`-based) this is done via boot **kargs**.
 
 ### Applied values
 
@@ -62,7 +114,7 @@ The script sets three kernel arguments:
 
 ### Why 48 GiB out of 64 GiB of RAM?
 
-- **Loaded models**: 21 GiB (chat) + 1.7 GiB (FIM) + KV cache. The chat KV cache is heavy at `--ctx-size 138240` (q8_0), so figure an overall envelope on the order of **35-40 GiB** once context fills up.
+- **Loaded models**: ~18 GiB (chat, Qwen3-30B-A3B UD-Q4_K_XL) + ~1.7 GiB (FIM 1.5B) + KV cache. With the chat context capped to 40960, the KV cache (q8_0) is only a couple of GiB, so the overall envelope sits around **22-25 GiB** once context fills. (If you enable YaRN to 131072, the KV grows to ~7 GiB and the envelope to ~30 GiB — re-check swap then.)
 - **GTT headroom**: whatever's left under 48 GiB absorbs allocation spikes.
 - **Reserved for the system**: 64 - 48 = 16 GiB for the kernel, the DE, apps, Steam, the page cache.
 
@@ -150,9 +202,13 @@ watch -n1 free -h
 ```
 
 - `Swap used` at **0** -> all good, even if `Mem used` looks huge.
-- `Swap used` climbing -> reduce `--ctx-size`, or lighten the load.
+- `Swap used` climbing -> reduce the effective context (or enable YaRN only when needed), or lighten the load.
 
-Validated baseline on this machine at `--ctx-size 138240`: `Swap used` ~ 0, `available` ~ 27 GiB. If you push context higher, re-watch swap.
+With the 30B at the native 40960 context, expect generous headroom (`Swap used` ~ 0, `available` comfortably above 30 GiB). If you enable YaRN to 131072, re-watch swap.
+
+### Throughput vs context (the real ceiling)
+
+On the 780M, generation is **memory-bandwidth bound**, so token rate falls as the KV cache grows. Observed on a real session: ~30 t/s at ~2k of context, decaying to ~17-20 t/s past ~25k, with prompt-eval (prefill) dropping from ~320 t/s to ~80 t/s over the same range. This is physics, not a bug. Practical consequences: keep sessions reasonably short, and cap thinking if latency bites. On this hardware you effectively pick **two of {smart, fast, long-context}** — bandwidth is the wall.
 
 ---
 
@@ -162,9 +218,11 @@ llama.cpp's built-in WebUI can call external tools exposed over **MCP**. Here we
 
 > The search MCP **does not replace** the WebUI: it plugs *into* it. The browser (WebUI) reaches the MCP through llama-server's **cors-proxy**, which avoids CORS issues. That's why `start-llm.sh` launches the chat server with `--ui-mcp-proxy`.
 
-### The flag was renamed
+### The flag name
 
-`--webui-mcp-proxy` is **deprecated**; the current name is **`--ui-mcp-proxy`** (the old one still works as an alias). The script already uses the new one. Equivalent env var: `LLAMA_ARG_UI_MCP_PROXY=1`.
+`--webui-mcp-proxy` is the **deprecated** spelling; the current name is **`--ui-mcp-proxy`** (the old one still works as an alias, so a script carrying `--webui-mcp-proxy` keeps working). Equivalent env var: `LLAMA_ARG_UI_MCP_PROXY=1`.
+
+> The periodic `http client error: Failed to read connection` lines in `main.log` paired with `proxying GET request to http://localhost:3333/mcp` are **cosmetic** — they're just the MCP SSE stream closing and reconnecting, not a model crash.
 
 ### Start the MCP
 
@@ -203,6 +261,7 @@ The MCP fetch originates from llama-server (inside the distrobox) toward `127.0.
 ~/llm-stack.sh restart    # stop + start
 ~/llm-stack.sh status     # ping /health on 8080 and 8081, + search container state
 ~/llm-stack.sh logs       # tail both logs
+~/llm-stack.sh warmup     # re-run the warmup manually
 
 # Via systemd
 systemctl --user status llm-stack.service
@@ -214,6 +273,8 @@ tail -f ~/llm-logs/fim.log     # FIM server
 tail -f ~/llm-logs/warmup.log  # warmup
 ```
 
+> The orchestrator launches the in-distrobox servers fully detached from the terminal (`setsid ... </dev/null` + `disown`). This is what stops `llama-server`'s loading bar / HF download progress from leaking onto your shell and leaving it choppy or frozen. If a terminal ever gets garbled, `reset` (or `stty sane`) fixes it.
+
 ### Test the endpoints
 
 ```bash
@@ -224,7 +285,7 @@ curl -sf http://127.0.0.1:8081/health && echo " <- FIM OK"
 # Chat (OpenAI-compatible)
 curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3.6-a3b","messages":[{"role":"user","content":"Hi"}],"max_tokens":50}'
+  -d '{"model":"qwen3-30b-a3b","messages":[{"role":"user","content":"Hi"}],"max_tokens":50}'
 
 # FIM (completions)
 curl -s http://127.0.0.1:8081/v1/completions \
@@ -237,7 +298,7 @@ curl -s http://127.0.0.1:3333/mcp
 
 ### Editor config
 
-The server exposes a stable alias (`qwen3.6-a3b` for chat, `qwen-coder-fim` for FIM), so the client config doesn't change even if you swap the underlying model. Just align the client `max_tokens` with the server `--ctx-size` (138240 for chat).
+The server exposes a stable alias (`qwen3-30b-a3b` for chat, `qwen-coder-fim` for FIM), so the client config doesn't change even if you swap the underlying model.
 
 ```json
 "edit_predictions": {
@@ -316,7 +377,9 @@ Edit `~/start-llm.sh` or `~/start-llm-fast.sh`, change `--hf-repo` / `--hf-file`
 ~/llm-stack.sh restart
 ```
 
-The model is downloaded automatically by llama.cpp from Hugging Face on first launch. If you change the FIM model, also adjust the pattern in `~/preload-models.sh`.
+The model is downloaded automatically by llama.cpp from Hugging Face on first launch. **No change needed in `preload-models.sh`**: it now reads `--hf-file` directly from the launch scripts and resolves the real blob in the HF cache, so the preloader always follows the model you actually run (this is what fixed the bug where it kept preloading the old 35B blob and reported the FIM "not found").
+
+> If you ever want to trade up on agentic coding / tool-use specifically, **GLM-4.7-Flash** (30B-A3B, MLA attention) is the strongest drop-in: MLA keeps the cache reuse intact *and* the KV ~4x smaller, so it decays less in throughput at high context. Just change `--hf-repo`/`--hf-file`/`--alias` in `start-llm.sh` (use **f16** KV with it, not q8_0), then restart and verify cache reuse in the log.
 
 ---
 
@@ -331,6 +394,10 @@ head -1 ~/start-llm-fast.sh | od -c | head -1
 ```
 
 You should see `#   !   /   b   i   n   /   b   a   s   h  \n`. If `#!` is missing, recreate the script with a quoted heredoc (`<< 'EOF'`).
+
+### Model "too dumb" / weak on code & reasoning
+
+Thinking is probably disabled. Check `~/llm-logs/main.log` for `init: chat template, thinking = 0`. Remove any `--reasoning off` / `--reasoning-budget 0` from `start-llm.sh`, make sure the sampling is the thinking profile (`--temp 0.6 --top-p 0.95`) and that `--presence-penalty` isn't set high, then restart. See the "Thinking mode" section.
 
 ### `connect to 127.0.0.1 port 808x ... refused`
 
@@ -353,7 +420,11 @@ If it's missing, add `export RADV_DEBUG=zerovram` under `RADV_PERFTEST=gpl` and 
 
 ### Slow / machine struggling, RAM full
 
-Check **swap**, not RAM (see "Memory" section). `free -h`: as long as `Swap used` is 0, full RAM is normal. If swap climbs, reduce `--ctx-size` on chat, and make sure `--no-mmap --mlock` wasn't reintroduced into the scripts.
+Check **swap**, not RAM (see "Memory" section). `free -h`: as long as `Swap used` is 0, full RAM is normal. If swap climbs, reduce the effective context on chat, and make sure `--no-mmap --mlock` wasn't reintroduced into the scripts.
+
+### Slow follow-ups / "re-processing the whole prompt"
+
+If the log shows `forcing full prompt re-processing due to lack of cache data` on every turn, the model has **hybrid/SWA/recurrent attention** and KV-cache reuse is unsupported — that's the Qwen3.5/3.6-A3B family. Switch back to a **full-attention** model (Qwen3-30B-A3B, or GLM-4.7-Flash with MLA). With a working setup you should instead see `selected slot by LCP similarity, sim_best = 0.9xx`.
 
 ### Web search MCP not working
 
@@ -370,14 +441,21 @@ If the container is up but the WebUI shows nothing: re-check that you toggled "u
 
 ### `Preloading... not found`
 
-The `find` can't locate the GGUF. Check:
+The new `preload-models.sh` reads `--hf-file` from the launch scripts and resolves the blob automatically, so this should be rare. If it still warns, the filename in the launch script doesn't match anything in the cache. List what's actually there:
 
 ```bash
-find ~/.cache/huggingface/hub -iname '*qwen*coder*1.5b*q8*' 2>/dev/null
-find ~/.cache/huggingface/hub -iname '*qwen3.6-35b*' 2>/dev/null
+find ~/.cache/huggingface/hub -iname '*.gguf' | sed 's#.*/##' | sort -u
 ```
 
-If the filename differs, adjust the patterns in `~/preload-models.sh`.
+and make sure the `--hf-file` in `start-llm.sh` / `start-llm-fast.sh` matches one of them.
+
+### Reclaim space from the old 35B
+
+If you migrated from Qwen3.6-35B-A3B, its ~21 GiB blob is still in the cache. Remove it:
+
+```bash
+rm -rf ~/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-GGUF
+```
 
 ### GTT isn't at the expected value after reboot
 
@@ -420,6 +498,7 @@ distrobox enter llm -- env | grep -E 'AMD_VULKAN|RADV'
 |  |  2. distrobox enter llm -- start-llm.sh    (8080)   |  |
 |  |  3. distrobox enter llm -- start-llm-fast.sh (8081) |  |
 |  |  4. podman compose up open-websearch       (3333)   |  |
+|  |  5. warmup (detached, background)                   |  |
 |  +-----------------------------------------------------+  |
 |                                                           |
 |  ~/.config/systemd/user/llm-stack.service                 |
