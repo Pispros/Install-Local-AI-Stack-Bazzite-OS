@@ -1,3 +1,5 @@
+#!/bin/bash
+# Serveur CHAT : Qwen3-30B-A3B (MoE full-attention, KV cache reuse OK) sur Radeon 780M (Vulkan/RADV), port 8080
 export AMD_VULKAN_ICD=RADV
 export RADV_PERFTEST=gpl
 export RADV_DEBUG=zerovram
@@ -7,6 +9,7 @@ export MESA_SHADER_CACHE_MAX_SIZE="4G"
 export OMP_NUM_THREADS=8
 export GOMP_CPU_AFFINITY="0-7"
 mkdir -p "$MESA_SHADER_CACHE_DIR"
+
 exec /home/NJMER/llama.cpp/build/bin/llama-server \
   --hf-repo unsloth/Qwen3-30B-A3B-GGUF \
   --hf-file Qwen3-30B-A3B-UD-Q4_K_XL.gguf \
