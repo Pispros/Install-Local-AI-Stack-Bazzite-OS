@@ -27,4 +27,4 @@ exec /home/NJMER/llama.cpp/build/bin/llama-server \
   --jinja \
   --reasoning-format deepseek \
   --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 \
-  --webui-mcp-proxy
+  --ui-mcp-proxy
