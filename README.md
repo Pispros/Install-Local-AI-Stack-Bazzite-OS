@@ -1,4 +1,4 @@
-# Local LLM stack — Bazzite Os
+# Local LLM stack — Radeon 780M / Bazzite Os
 
 All-in-one local LLM stack on **Bazzite OS** using the **Radeon 780M** iGPU (Ryzen 9 8945HS), via a **Fedora distrobox** (`llm`) that builds `llama.cpp` with **Vulkan/RADV**. Orchestrated from the host by `llm-stack.sh`.
 
