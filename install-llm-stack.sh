@@ -44,14 +44,13 @@ wait_ready() {
   return 1
 }
 
-# Lance une commande dans le distrobox, totalement détachée du terminal :
-#   setsid    -> nouvelle session, plus de TTY de contrôle
-#   </dev/null -> distrobox/podman ne voit plus de TTY, n'alloue pas de -t
-#   >log 2>&1 -> tout part dans le log, rien ne pollue l'écran
-#   disown    -> retiré de la table des jobs du shell (pas de SIGHUP)
+# Lance un script dans le distrobox, totalement détaché du terminal.
+# IMPORTANT : on l'invoque via `bash "$script"` (et pas en exécution directe).
+# Du coup le bit +x ET le shebang du script deviennent FACULTATIFS : un
+# copier-coller qui casse l'un ou l'autre ne pourra plus empêcher le démarrage.
 launch_detached() {
   local script=$1 logfile=$2 pidfile=$3
-  setsid distrobox enter "$CONTAINER" -- "$script" </dev/null >"$logfile" 2>&1 &
+  setsid distrobox enter "$CONTAINER" -- bash "$script" </dev/null >"$logfile" 2>&1 &
   echo $! > "$pidfile"
   disown
 }
@@ -82,12 +81,11 @@ warmup_fim() {
 }
 
 start_all() {
-  echo "═══ Stack LLM — Qwen3-30B-A3B (chat) + Coder-3B (FIM) ═══"
+  echo "═══ Stack LLM — Qwen3-30B-A3B (chat) + Coder-1.5B (FIM) ═══"
 
   echo "📦 [1/4] podman start $CONTAINER"
   podman start "$CONTAINER" </dev/null >/dev/null 2>&1
 
-  # NB : pense à pointer preload-models.sh vers le .gguf du 30B-A3B.
   echo "🔥 [2/4] Préchargement page cache (hôte)..."
   "$HOME/preload-models.sh" </dev/null
 
@@ -95,11 +93,11 @@ start_all() {
   launch_detached "$MAIN_SCRIPT" "$LOGDIR/main.log" "$LOGDIR/main.pid"
   wait_ready "$CHAT_PORT" 180 "chat"
 
-  echo "⚡ [4/4] Coder-3B FIM sur :$FIM_PORT..."
+  echo "⚡ [4/4] Coder-1.5B FIM sur :$FIM_PORT..."
   launch_detached "$FIM_SCRIPT" "$LOGDIR/fim.log" "$LOGDIR/fim.pid"
   wait_ready "$FIM_PORT" 60 "FIM"
 
-  # Warmup détaché lui aussi : ne bloque pas, ne pollue pas l'écran.
+  # Warmup détaché : ne bloque pas, ne pollue pas l'écran.
   setsid bash -c "$(declare -f warmup_chat warmup_fim); \
     CHAT_ALIAS='$CHAT_ALIAS' CHAT_PORT='$CHAT_PORT' FIM_PORT='$FIM_PORT'; \
     warmup_chat; warmup_fim" </dev/null >>"$LOGDIR/warmup.log" 2>&1 &
