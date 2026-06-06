@@ -1,106 +1,252 @@
-# Stack LLM locale — UM890 Pro / Bazzite
+# Local LLM stack — Bazzite Os
 
-Stack LLM locale sur **Bazzite OS**, iGPU **Radeon 780M** (Ryzen 9 8945HS), via une **distrobox Fedora** (`llm`) qui compile `llama.cpp` avec **Vulkan/RADV**. Orchestrée depuis l'hôte par `llm-stack.sh`.
+All-in-one local LLM stack on **Bazzite OS** using the **Radeon 780M** iGPU (Ryzen 9 8945HS), via a **Fedora distrobox** (`llm`) that builds `llama.cpp` with **Vulkan/RADV**. Orchestrated from the host by `llm-stack.sh`.
 
-Deux serveurs `llama-server` tournent en parallèle dans la distrobox :
+Two `llama-server` instances run in parallel inside the distrobox, plus a dedicated podman container for web search:
 
-| Service | Modèle                         | Quant      | Port | Usage              |
-|---------|--------------------------------|------------|------|--------------------|
-| Chat    | Qwen3-30B-A3B                  | UD-Q4_K_XL | 8080 | Conversation, MCP  |
-| FIM     | Qwen2.5-Coder-1.5B             | Q8_0       | 8081 | Autocomplétion IDE |
+| Service | Model / Image                | Quant      | Port | Use                      |
+|---------|------------------------------|------------|------|--------------------------|
+| Chat    | Qwen3-30B-A3B                | UD-Q4_K_XL | 8080 | Conversation, MCP        |
+| FIM     | Qwen2.5-Coder-1.5B           | Q8_0       | 8081 | IDE autocomplete         |
+| Search  | open-websearch (MCP)         | —          | 3333 | Web search for the WebUI |
 
-> **Chat = Qwen3-30B-A3B** (MoE, attention pleine). C'est volontaire : contrairement à un modèle à attention hybride, le KV cache est réutilisable, donc **les follow-ups d'une conversation restent rapides**. Seul le tout premier message d'une nouvelle conversation paie le coût du gros prompt système du client (cold start) — voir « Warmup ».
+> **Chat = Qwen3-30B-A3B** (MoE, full attention). Deliberate choice: unlike a hybrid-attention model, the KV cache is reusable, so **follow-ups within a conversation stay fast**. Only the very first message of a new conversation pays the cost of the client's large system prompt (cold start) — see *Warmup*.
 >
-> **FIM = Coder-1.5B** (modèle *base*, pas Instruct) : pour l'autocomplétion la contrainte est la latence, pas la taille. La suggestion doit arriver avant la frappe suivante.
+> **FIM = Coder-1.5B** (*base* model, not Instruct). For autocomplete the constraint is latency, not size: the suggestion must arrive before you type the next character. Alternatives if needed: **0.5B** (even lower latency, weaker) or **3B** (better, slower).
 
 ---
 
-## Fichiers
+## Quick start
 
-Tous dans `~` (`/home/NJMER`) :
+Scripts already in `~/`? Make them executable, enable the service, and launch:
 
-| Fichier              | Rôle                                                                              |
-|----------------------|-----------------------------------------------------------------------------------|
-| `llm-stack.sh`       | Orchestrateur (hôte). `start`/`stop`/`restart`/`status`/`logs`/`warmup`.          |
-| `start-llm.sh`       | Lance le serveur **chat** (8080) dans la distrobox.                               |
-| `start-llm-fast.sh`  | Lance le serveur **FIM** (8081) dans la distrobox.                                |
-| `preload-models.sh`  | Précharge les `.gguf` en page cache de l'hôte avant le démarrage des serveurs.    |
-| `warmup-llm.sh`      | **Optionnel**, non appelé par `llm-stack.sh` (qui fait son warmup en interne).    |
+```bash
+chmod +x ~/start-llm.sh ~/start-llm-fast.sh ~/preload-models.sh ~/llm-stack.sh ~/warmup-llm.sh
+systemctl --user enable --now llm-stack.service   # auto-start at login + start now
+sudo loginctl enable-linger "$USER"               # keep running without an open session
+bash ~/llm-stack.sh status                         # expect ✅ port 8080 and ✅ port 8081
+```
+
+No systemd unit yet? Start the stack directly:
+
+```bash
+chmod +x ~/*.sh
+bash ~/llm-stack.sh start
+bash ~/llm-stack.sh status
+```
+
+> First boot downloads the GGUF files and compiles Vulkan shaders, so the first `start` is slow. Watch progress with `bash ~/llm-stack.sh logs`.
 
 ---
 
-## Utilisation
+## Quick install
+
+```bash
+bash install-llm-stack.sh
+```
+
+The script is **idempotent**: re-run it as often as you like. Each step checks state before acting.
+
+### Options
+
+```
+--skip-kargs    skip the kargs change (already done)
+--skip-build    skip building llama.cpp (already done)
+--status        show current state without changing anything
+```
+
+### What it does
+
+1. Lays down the GTT kargs (48 GiB) so the iGPU can address enough RAM.
+2. Creates the `llm` Fedora distrobox with `/dev/dri` + `/dev/kfd`.
+3. Builds `llama.cpp` with the Vulkan backend.
+4. Installs the stack scripts in `~/`.
+5. Installs and enables the `llm-stack.service` systemd --user unit.
+
+---
+
+## Files
+
+All in `~` (`/home/NJMER`):
+
+| File                 | Role                                                                       |
+|----------------------|----------------------------------------------------------------------------|
+| `llm-stack.sh`       | Host orchestrator. `start`/`stop`/`restart`/`status`/`logs`/`warmup`.      |
+| `start-llm.sh`       | Launches the **chat** server (8080) inside the distrobox.                  |
+| `start-llm-fast.sh`  | Launches the **FIM** server (8081) inside the distrobox.                   |
+| `preload-models.sh`  | Preloads the `.gguf` files into the host page cache before launch.         |
+| `warmup-llm.sh`      | **Optional**, not called by `llm-stack.sh` (which warms up inline).        |
+
+---
+
+## Usage
 
 ```bash
 bash ~/llm-stack.sh start      # podman start + preload + chat + FIM + warmup
-bash ~/llm-stack.sh status     # ✅/❌ pour 8080 et 8081
-bash ~/llm-stack.sh restart    # stop puis start
-bash ~/llm-stack.sh stop       # tue les llama-server dans la distrobox
-bash ~/llm-stack.sh logs       # tail -F des logs (~/llm-logs/*.log)
-bash ~/llm-stack.sh warmup     # relance le warmup à la main
+bash ~/llm-stack.sh status     # ✅/❌ for ports 8080 and 8081
+bash ~/llm-stack.sh restart    # stop then start
+bash ~/llm-stack.sh stop       # kill llama-server inside the distrobox
+bash ~/llm-stack.sh logs       # tail -F of ~/llm-logs/*.log
+bash ~/llm-stack.sh warmup     # re-run the warmup by hand
 ```
 
-Logs : `~/llm-logs/main.log` (chat), `~/llm-logs/fim.log` (FIM), `~/llm-logs/warmup.log`.
+Logs: `~/llm-logs/main.log` (chat), `~/llm-logs/fim.log` (FIM), `~/llm-logs/warmup.log`.
 
-### Démarrage automatique (systemd --user)
+### Auto-start (systemd --user)
 
-Le service `llm-stack.service` lance la stack au login :
+`llm-stack.service` starts the stack at login:
 
 ```bash
 systemctl --user enable --now llm-stack.service
 systemctl --user status llm-stack.service
+sudo loginctl enable-linger "$USER"   # start without an open session
 ```
 
-(Au besoin, `sudo loginctl enable-linger "$USER"` pour que ça démarre sans session ouverte.)
-
 ---
 
-## Changer de modèle de chat
+## Changing the chat model
 
-Le préchargeur et l'orchestrateur **suivent automatiquement** le modèle déclaré dans le script de lancement. Pour basculer :
+The preloader and orchestrator **follow the model declared in the launch script** — no hard-coded names. To switch:
 
-1. Édite `start-llm.sh` : `--hf-repo`, `--hf-file`, `--alias`.
-2. Mets `CHAT_ALIAS` à la **même** valeur dans `llm-stack.sh` (utilisé pour le warmup).
+1. Edit `start-llm.sh`: `--hf-repo`, `--hf-file`, `--alias`.
+2. Set `CHAT_ALIAS` to the **same** value in `llm-stack.sh` (used by the warmup).
 3. `bash ~/llm-stack.sh restart`.
 
-`preload-models.sh` n'a **aucun nom de modèle en dur** : il lit `--hf-file` (chat) et accepte aussi la forme courte `-hf repo[:file]` (FIM), puis résout le blob réel dans le cache HF.
+`preload-models.sh` reads `--hf-file` (chat) and also accepts the short form `-hf repo[:file]` (FIM), then resolves the real blob in the HF cache.
 
 ---
 
-## Robustesse (lancement)
+## Robustness (launch)
 
-`llm-stack.sh` lance chaque serveur via **`bash "$script"`** (pas en exécution directe). Conséquence : le **bit `+x`** *et* le **shebang** des scripts sont **facultatifs** — un copier-coller qui en casse un ne peut plus empêcher le démarrage.
+`llm-stack.sh` launches each server via **`bash "$script"`** (not direct execution). As a result the **`+x` bit** *and* the **shebang** are **optional** — a paste that breaks either one can no longer stop the stack from starting.
 
-Le lancement est aussi détaché du terminal (`setsid` + `</dev/null` + redirection des logs + `disown`), donc la barre de progression de `llama-server` et un éventuel téléchargement HF ne polluent ni ne bloquent le terminal.
+Launch is also detached from the terminal (`setsid` + `</dev/null` + log redirection + `disown`), so `llama-server`'s progress bar and any HF download neither pollute nor block the terminal.
 
 ---
 
 ## Warmup
 
-Au `start`, après que les deux serveurs répondent sur `/health`, un warmup en arrière-plan envoie une requête chat et une requête FIM. Ça réchauffe le **moteur** : compilation des shaders Vulkan/Mesa au premier appel, modèle en page cache, chemin prefill amorcé.
+On `start`, once both servers answer `/health`, a background warmup fires one chat request and one FIM request. This warms the **engine**: first-call Vulkan/Mesa shader compilation, model in page cache, prefill path primed.
 
-Limite honnête : ce warmup générique **ne peut pas** préchauffer le gros prompt système spécifique de ton client (Zed/WebUI). Le cold start du premier message d'une conversation reste donc présent ; pour l'éliminer il faudrait capturer puis rejouer ce prompt exact (cf. `warmup-llm.sh`, qui amorce un prompt système stable).
-
----
-
-## Mémoire GPU (GTT)
-
-Le 780M partage la RAM. Pour charger le 30B-A3B + son contexte, les kargs réservent ~48 GiB de GTT au iGPU. Si tu reconstruis le système ou changes ces kargs, un **reboot** est nécessaire pour qu'ils prennent effet, puis relance `~/llm-stack.sh start`.
+Honest limit: this generic warmup **cannot** preheat the client-specific large system prompt (Zed/WebUI). The first-message cold start of a conversation therefore remains; to kill it you'd capture and replay that exact prompt (see `warmup-llm.sh`, which primes a stable system prompt).
 
 ---
 
-## Dépannage
+## The VRAM carve-out and `RADV_DEBUG=zerovram`
 
-| Symptôme (dans `main.log` ou au démarrage)      | Cause                                                        | Fix                                                                 |
-|-------------------------------------------------|--------------------------------------------------------------|---------------------------------------------------------------------|
-| `exec: Exec format error`                       | Shebang `#!/bin/bash` manquant/cassé en 1re ligne du script  | Réécrire le script (`cat > … << 'EOF'`) ; lancé via `bash` désormais |
-| `OCI permission denied … not executable`        | Script sans bit `+x` (exécution directe)                     | `chmod +x ~/*.sh` (et `bash "$script"` rend ça non bloquant)         |
-| `⚠ FIM (?) introuvable en cache`                | Ancien préchargeur ne lisait pas `-hf` (forme courte)        | Corrigé : `preload-models.sh` gère `--hf-file` **et** `-hf`          |
-| `❌ port 8080` (timeout au démarrage)            | Le chat n'a pas démarré                                      | `tail -n 40 ~/llm-logs/main.log` pour la vraie erreur               |
-| Terminal en mode « cassé » après un run         | TTY mis en raw par la barre de progression                   | `reset` ou `stty sane` ; déjà mitigé par le détachement `setsid`    |
+**Cause of throughput variance:** the 780M VRAM carve-out is only **1 GiB**. RADV tries to allocate compute buffers in that zone, fails as it fills, and falls back to sysmem with irregular behavior.
 
-Vérifier que le thinking est actif côté chat :
+**Fix:** `RADV_DEBUG=zerovram` tells RADV to ignore that 1 GiB carve-out (useless on a UMA architecture) and route everything via the **GTT**. VRAM and GTT point to the same physical RAM at the same speed, so you lose nothing and remove the bottleneck. Set in `start-llm.sh` **and** `start-llm-fast.sh`.
+
+Check the carve-out size:
+
+```bash
+for d in /sys/class/drm/card*/device/mem_info_vram_total; do
+  echo "$d : $(awk '{print $1/1048576 " MiB"}' "$d" 2>/dev/null)"
+done
+# Expected: 1024 MiB  (normal — zerovram handles it)
+```
+
+Plan B (rare): grow the carve-out in the **BIOS** ("UMA Frame Buffer Size" / `UMA_SPECIFIED`) to 4–8 GiB. That permanently reserves RAM, whereas `zerovram` is free and reversible — hence it's the default.
+
+---
+
+## Memory: no `--no-mmap --mlock`
+
+The launch scripts **deliberately omit** `--no-mmap` and `--mlock`.
+
+- `--no-mmap` loads the whole model into non-reclaimable RAM instead of mapping it from disk.
+- `--mlock` locks that memory so Linux can't evict it.
+
+On this UMA architecture (model + KV cache already live in RAM via the GTT), these push you toward saturation and **swap** — *the* cause of the monster slowdowns. Leaving `mmap` active keeps much of the model in reclaimable `buff/cache`.
+
+### The only criterion that matters: swap
+
+A "full" RAM is **not** a problem (`buff/cache` is reclaimable). What matters is swap staying at zero. During a run:
+
+```bash
+watch -n1 free -h
+```
+
+- `Swap used` at **0** → fine, even if `Mem used` looks huge.
+- `Swap used` climbing → lower `--ctx-size`, or lighten the load.
+
+Validated baseline at `--ctx-size 138240`: `Swap used` ~ 0, `available` ~ 27 GiB. Push context higher → re-watch swap.
+
+---
+
+## Web search via MCP (open-websearch)
+
+llama.cpp's built-in WebUI can call external tools over **MCP**. Here: **open-websearch**, a multi-engine MCP server (DuckDuckGo, Bing, Brave…) **with no API key**, in its own podman container on port **3333**.
+
+> The search MCP **does not replace** the WebUI — it plugs into it. The browser reaches the MCP through llama-server's **cors-proxy**, avoiding CORS issues. That's why the chat server is launched with the UI MCP proxy enabled.
+
+### Flag name
+
+The canonical flag is **`--ui-mcp-proxy`** (what `start-llm.sh` uses). `--webui-mcp-proxy` is the **deprecated alias** — still accepted, since the server routes on `ui_mcp_proxy || webui_mcp_proxy`. Env equivalent: `LLAMA_ARG_UI_MCP_PROXY=1`.
+
+> ⚠️ The rename is recent. If your `llama-server` was built **before** it, only `--webui-mcp-proxy` exists and `--ui-mcp-proxy` will error. Check your build:
+>
+> ```bash
+> distrobox enter llm -- /home/NJMER/llama.cpp/build/bin/llama-server --help 2>&1 | grep -i mcp-proxy
+> ```
+>
+> If only the `--webui` form shows up, either keep it or rebuild llama.cpp to move to the new name.
+
+To connect in the WebUI: add the `/mcp` URL as an MCP server, **save** it, reopen via the pencil/edit icon, then toggle **"use llama-server proxy"** (the toggle only appears after re-opening — known UX trap).
+
+---
+
+## Troubleshooting
+
+| Symptom (in `main.log` or at startup)          | Cause                                                      | Fix                                                                  |
+|------------------------------------------------|------------------------------------------------------------|----------------------------------------------------------------------|
+| `exec: Exec format error`                      | Missing/garbled `#!/bin/bash` on line 1 of the script      | Rewrite via `cat > … << 'EOF'`; launched through `bash` now           |
+| `OCI permission denied … not executable`       | Script lost its `+x` bit (direct execution)                | `chmod +x ~/*.sh` (and `bash "$script"` makes this non-blocking)      |
+| `⚠ FIM (?) introuvable en cache`               | Old preloader didn't parse the short `-hf` form            | Fixed: `preload-models.sh` handles `--hf-file` **and** `-hf`          |
+| `❌ port 8080` (startup timeout)               | Chat server didn't come up                                 | `tail -n 40 ~/llm-logs/main.log` for the real error                  |
+| `Failed to allocate` / wild throughput variance| 1 GiB VRAM carve-out filling up                            | Ensure `RADV_DEBUG=zerovram` is set in both launch scripts           |
+| Slowdowns, RAM full, swap rising               | `mmap` disabled / context too large                        | Keep `mmap` on; lower `--ctx-size`; `watch -n1 free -h`              |
+| Terminal stuck in "broken" mode after a run    | TTY left in raw mode by a progress bar                     | `reset` or `stty sane`; mitigated by `setsid` detachment            |
+| Degraded perf after reboot                     | Vulkan shaders recompiled after a driver/Mesa change       | Normal first prompt; check `~/.cache/mesa_shader_cache/`            |
+
+Check that thinking is active on the chat server:
 
 ```bash
 grep "thinking =" ~/llm-logs/main.log
 ```
+
+---
+
+## Architecture
+
+```
++-----------------------------------------------------------+
+|  Bazzite OS (host, immutable)                             |
+|                                                           |
+|  +-- ~/llm-stack.sh (orchestrator) --------------------+  |
+|  |                                                     |  |
+|  |  1. preload-models.sh  <- page cache GGUF           |  |
+|  |  2. distrobox enter llm -- bash start-llm.sh  (8080)|  |
+|  |  3. distrobox enter llm -- bash start-llm-fast (8081)| |
+|  |  4. podman compose up open-websearch       (3333)   |  |
+|  +-----------------------------------------------------+  |
+|                                                           |
+|  ~/.config/systemd/user/llm-stack.service                 |
+|       +- ExecStart=~/llm-stack.sh start (auto at login)   |
+|                                                           |
+|  Kargs : ttm.pages_limit / amdgpu.gttsize = 48 GiB        |
+|  RADV_DEBUG=zerovram -> all via GTT (1 GiB carve-out off) |
++--------------+----------------------------+---------------+
+               | (podman + distrobox)       | (podman)
+               v                            v
++------------------------------------+  +--------------------------+
+|  Container 'llm' (fedora-toolbox)  |  |  open-websearch (MCP)    |
+|   - /dev/dri, /dev/kfd mounted     |  |   :3333  /mcp  /sse      |
+|   - llama-server (Vulkan) -> 780M  |<-|   DuckDuckGo/Bing/Brave  |
+|   - chat :8080  +  FIM :8081       |  |   (via WebUI cors-proxy) |
+|   - UI MCP proxy (chat)            |  +--------------------------+
++------------------------------------+
+```
+
+The container shares `$HOME` with the host, so the scripts in `~/` are reachable from both sides without copying.
