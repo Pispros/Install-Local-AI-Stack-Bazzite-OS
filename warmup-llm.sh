@@ -4,7 +4,7 @@
 # L'alias doit correspondre à celui de start-llm.sh.
 set -u
 
-CHAT_ALIAS="qwen3-30b-a3b"
+CHAT_ALIAS="glm-4.7-flash"
 SYS_PROMPT_FILE="$HOME/.config/llm/system-prompt.txt"
 mkdir -p "$(dirname "$SYS_PROMPT_FILE")"
 
