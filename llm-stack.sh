@@ -1,6 +1,6 @@
 #!/bin/bash
 # Orchestrateur : précharge sur l'hôte, lance les 2 serveurs dans le distrobox, puis warmup.
-# Chat = Qwen3-30B-A3B (attention pleine -> KV cache reuse OK, follow-ups rapides).
+# Chat = GLM-4.7-Flash (30B-A3B MoE, attention pleine -> KV cache reuse OK, follow-ups rapides).
 set -u
 
 LOGDIR="$HOME/llm-logs"
@@ -13,7 +13,7 @@ FIM_SCRIPT="/home/NJMER/start-llm-fast.sh"
 # --- Modèle de chat courant ---------------------------------------------------
 # Pour changer de modèle : édite start-llm.sh (--hf-repo/--hf-file/--alias)
 # ET mets CHAT_ALIAS à la meme valeur ici.
-CHAT_ALIAS="qwen3-30b-a3b"
+CHAT_ALIAS="glm-4.7-flash"
 CHAT_PORT=8080
 FIM_PORT=8081
 # -----------------------------------------------------------------------------
@@ -81,7 +81,7 @@ warmup_fim() {
 }
 
 start_all() {
-  echo "═══ Stack LLM — Qwen3-30B-A3B (chat) + Coder-1.5B (FIM) ═══"
+  echo "═══ Stack LLM — GLM-4.7-Flash (chat) + Coder-1.5B (FIM) ═══"
 
   echo "📦 [1/4] podman start $CONTAINER"
   podman start "$CONTAINER" </dev/null >/dev/null 2>&1
@@ -89,7 +89,7 @@ start_all() {
   echo "🔥 [2/4] Préchargement page cache (hôte)..."
   "$HOME/preload-models.sh" </dev/null
 
-  echo "🧠 [3/4] Qwen3-30B-A3B sur :$CHAT_PORT..."
+  echo "🧠 [3/4] GLM-4.7-Flash sur :$CHAT_PORT..."
   launch_detached "$MAIN_SCRIPT" "$LOGDIR/main.log" "$LOGDIR/main.pid"
   wait_ready "$CHAT_PORT" 180 "chat"
 
