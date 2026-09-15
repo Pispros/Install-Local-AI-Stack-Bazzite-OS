@@ -67,4 +67,4 @@ exec bwrap \
     --chat-template-kwargs '{"enable_thinking": false}' \
     --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 \
     --ui-mcp-proxy \
-    --ui-config-file "/home/NJMER/All/llm-working-dir/mcp.json"
+    --ui-config-file "/home/xxx/All/llm-working-dir/mcp.json"
