@@ -1,6 +1,9 @@
+cat llm-stack.sh 
 #!/bin/bash
 # Orchestrateur : précharge sur l'hôte, lance les 2 serveurs dans le distrobox, puis warmup.
-# Chat = GLM-4.7-Flash (30B-A3B MoE, attention pleine -> KV cache reuse OK, follow-ups rapides).
+# Chat = Qwen3.5-35B-A3B (MoE HYBRIDE Gated DeltaNet). ⚠ GDN : reprocessing complet du
+# prompt à chaque tour (pas de KV cache reuse propre comme le 30B-2507) -> follow-ups plus lents.
+# FIM = DeepSeek-Coder-V2-Lite (Q5_K_M) pour l'autocomplétion de code.
 set -u
 
 LOGDIR="$HOME/llm-logs"
@@ -13,8 +16,11 @@ FIM_SCRIPT="/home/NJMER/start-llm-fast.sh"
 # --- Modèle de chat courant ---------------------------------------------------
 # Pour changer de modèle : édite start-llm.sh (--hf-repo/--hf-file/--alias)
 # ET mets CHAT_ALIAS à la meme valeur ici.
-CHAT_ALIAS="glm-4.7-flash"
+CHAT_ALIAS="qwen3.5-35b-a3b"
 CHAT_PORT=8080
+
+# --- Configuration FIM (DeepSeek-Coder-V2-Lite) -------------------------------
+FIM_ALIAS="deepseek-coder-fim" # Vérifiez que c'est bien l'alias dans start-llm-fast.sh
 FIM_PORT=8081
 # -----------------------------------------------------------------------------
 
@@ -30,27 +36,33 @@ stop_all() {
 }
 
 wait_ready() {
-  local port=$1 timeout=$2 label=$3
+  local port=$1 timeout=$2 label=$3 pidfile=${4:-}
   echo -n "    Attente $label (port $port)"
-  for i in $(seq 1 "$timeout"); do
+  local i=0
+  while true; do
     if curl -sf "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
       echo " — prêt en ${i}s ✅"
       return 0
     fi
+    # si le process détaché est mort -> vrai échec, on n'attend pas pour rien
+    if [ -n "$pidfile" ] && [ -f "$pidfile" ] && ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      echo " ❌ process terminé (voir log)"
+      return 1
+    fi
+    i=$((i+1))
+    if [ "$i" -ge "$timeout" ]; then
+      echo " ❌ timeout"
+      return 1
+    fi
     echo -n "."
     sleep 1
   done
-  echo " ❌ timeout"
-  return 1
 }
 
 # Lance un script dans le distrobox, totalement détaché du terminal.
-# IMPORTANT : on l'invoque via `bash "$script"` (et pas en exécution directe).
-# Du coup le bit +x ET le shebang du script deviennent FACULTATIFS : un
-# copier-coller qui casse l'un ou l'autre ne pourra plus empêcher le démarrage.
 launch_detached() {
   local script=$1 logfile=$2 pidfile=$3
-  setsid distrobox enter "$CONTAINER" -- bash "$script" </dev/null >"$logfile" 2>&1 &
+  setsid nohup distrobox enter "$CONTAINER" -- bash "$script" </dev/null >"$logfile" 2>&1 &
   echo $! > "$pidfile"
   disown
 }
@@ -69,10 +81,20 @@ warmup_chat() {
 }
 
 warmup_fim() {
-  echo "🌡  Warmup FIM ..."
+  # Prompt adapté pour DeepSeek (Python/Logic)
+  local prompt="# Fonction pour calculer la factorielle d'un nombre
+def factorial(n):
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+
+# Tester la fonction
+print(factorial(5))"
+  
+  echo "🌡  Warmup FIM ($FIM_ALIAS) ..."
   if curl -s "http://127.0.0.1:$FIM_PORT/v1/completions" \
        -H "Content-Type: application/json" \
-       -d '{"prompt":"// additionne deux entiers\nfunction add(a: number, b: number): number {\n  return ","max_tokens":32,"stream":false}' \
+       -d "{\"prompt\":\"$prompt\",\"max_tokens\":32,\"stream\":false}" \
        >/dev/null 2>&1; then
     echo "🌡  Warmup FIM terminé ✅"
   else
@@ -81,7 +103,7 @@ warmup_fim() {
 }
 
 start_all() {
-  echo "═══ Stack LLM — GLM-4.7-Flash (chat) + Coder-1.5B (FIM) ═══"
+  echo "═══ Stack LLM — Qwen3.5-35B-A3B (chat) + DeepSeek-V2-Lite (FIM) ═══"
 
   echo "📦 [1/4] podman start $CONTAINER"
   podman start "$CONTAINER" </dev/null >/dev/null 2>&1
@@ -89,13 +111,14 @@ start_all() {
   echo "🔥 [2/4] Préchargement page cache (hôte)..."
   "$HOME/preload-models.sh" </dev/null
 
-  echo "🧠 [3/4] GLM-4.7-Flash sur :$CHAT_PORT..."
+  echo "🧠 [3/4] Qwen3.5-35B-A3B (GDN) sur :$CHAT_PORT..."
   launch_detached "$MAIN_SCRIPT" "$LOGDIR/main.log" "$LOGDIR/main.pid"
-  wait_ready "$CHAT_PORT" 180 "chat"
+  # timeout large : couvre un 1er download complet (~21 Go). Démarrages suivants = quelques s.
+  wait_ready "$CHAT_PORT" 3600 "chat" "$LOGDIR/main.pid"
 
-  echo "⚡ [4/4] Coder-1.5B FIM sur :$FIM_PORT..."
+  echo "⚡ [4/4] DeepSeek-Coder-V2-Lite FIM sur :$FIM_PORT..."
   launch_detached "$FIM_SCRIPT" "$LOGDIR/fim.log" "$LOGDIR/fim.pid"
-  wait_ready "$FIM_PORT" 60 "FIM"
+  wait_ready "$FIM_PORT" 180 "FIM" "$LOGDIR/fim.pid"
 
   # Warmup détaché : ne bloque pas, ne pollue pas l'écran.
   setsid bash -c "$(declare -f warmup_chat warmup_fim); \
