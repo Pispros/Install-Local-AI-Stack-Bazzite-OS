@@ -4,6 +4,7 @@
 # MCP distant (searxng-mcp) branché via la WebUI : nécessite --ui-mcp-proxy (dernière ligne).
 # ÉCRITURES : uniquement $WORK_DIR. LECTURES : $WORK_DIR (rw) + runtime ro + dossier du modèle (ro). Reste de $HOME invisible.
 # Nested podman : /proc bindé, pas d'unshare-pid → sinon "Can't mount proc: Operation not permitted".
+# Tous les chemins dérivent de $HOME → aucun chemin machine en dur.
 set -euo pipefail
 
 command -v bwrap >/dev/null || { echo "bwrap absent : sudo dnf install -y bubblewrap"; exit 1; }
@@ -15,13 +16,13 @@ export GGML_VK_ALLOW_SYSMEM_FALLBACK=1
 export OMP_NUM_THREADS=8
 export GOMP_CPU_AFFINITY="0-7"
 
-WORK_DIR="/home/xxx/All/llm-working-dir"
+WORK_DIR="$HOME/All/llm-working-dir"
 SLOT_DIR="$WORK_DIR/.slots"
 export MESA_SHADER_CACHE_DIR="$WORK_DIR/.mesa_cache"
 export MESA_SHADER_CACHE_MAX_SIZE="4G"
 mkdir -p "$WORK_DIR" "$SLOT_DIR" "$MESA_SHADER_CACHE_DIR"
 
-LLAMA_DIR="/home/xxx/llama.cpp/build"                 # binaire + libs (ro)
+LLAMA_DIR="$HOME/llama.cpp/build" # binaire + libs (ro)
 
 # ── Fichiers dans le cache hub (on binde tout le dossier models--… pour que les symlinks snapshots→blobs résolvent) ──
 HUB="$HOME/.cache/huggingface/hub/models--unsloth--Qwen3.5-35B-A3B-GGUF"
@@ -48,23 +49,23 @@ exec bwrap \
   --bind "$WORK_DIR" "$WORK_DIR" \
   --chdir "$WORK_DIR" \
   "$LLAMA_DIR/bin/llama-server" \
-    -m "$MODEL" \
-    --mmproj "$MMPROJ" \
-    --no-mmproj-offload \
-    --alias qwen3.5-35b-a3b \
-    -ngl 99 \
-    --ctx-size 262144 \
-    --parallel 1 \
-    --slot-save-path "$SLOT_DIR" \
-    -fa on \
-    --cache-type-k q8_0 --cache-type-v q8_0 \
-    -b 2048 -ub 512 \
-    --threads 8 --threads-batch 8 \
-    --host 0.0.0.0 --port 8080 \
-    --jinja \
-    --tools read_file,write_file,edit_file,grep_search,file_glob_search,exec_shell_command \
-    --cors-origins '*' \
-    --chat-template-kwargs '{"enable_thinking": false}' \
-    --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 \
-    --ui-mcp-proxy \
-    --ui-config-file "/home/xxx/All/llm-working-dir/mcp.json"
+  -m "$MODEL" \
+  --mmproj "$MMPROJ" \
+  --no-mmproj-offload \
+  --alias qwen3.5-35b-a3b \
+  -ngl 99 \
+  --ctx-size 262144 \
+  --parallel 1 \
+  --slot-save-path "$SLOT_DIR" \
+  -fa on \
+  --cache-type-k q8_0 --cache-type-v q8_0 \
+  -b 2048 -ub 512 \
+  --threads 8 --threads-batch 8 \
+  --host 0.0.0.0 --port 8080 \
+  --jinja \
+  --tools read_file,write_file,edit_file,grep_search,file_glob_search,exec_shell_command \
+  --cors-origins '*' \
+  --chat-template-kwargs '{"enable_thinking": false}' \
+  --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 \
+  --ui-mcp-proxy \
+  --ui-config-file "$WORK_DIR/mcp.json"
