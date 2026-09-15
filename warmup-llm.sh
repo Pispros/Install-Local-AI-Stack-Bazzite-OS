@@ -1,10 +1,11 @@
 #!/bin/bash
 # OPTIONNEL — non appelé par llm-stack.sh (qui fait son propre warmup inline).
 # Garde-le seulement si tu veux préchauffer un prompt SYSTÈME stable à la main.
-# L'alias doit correspondre à celui de start-llm.sh.
+# Les alias doivent correspondre à ceux de start-llm.sh / start-llm-fast.sh.
 set -u
 
-CHAT_ALIAS="glm-4.7-flash"
+CHAT_ALIAS="qwen3.5-35b-a3b"
+FIM_ALIAS="deepseek-coder-q5"
 SYS_PROMPT_FILE="$HOME/.config/llm/system-prompt.txt"
 mkdir -p "$(dirname "$SYS_PROMPT_FILE")"
 
@@ -31,7 +32,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 echo "[$(date +%H:%M:%S)] warmup FIM (port 8081)..."
 curl -s http://127.0.0.1:8081/v1/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen-coder-fim","prompt":"def hello():","max_tokens":1,"cache_prompt":true}' \
+  -d "{\"model\":\"${FIM_ALIAS}\",\"prompt\":\"def hello():\",\"max_tokens\":1,\"cache_prompt\":true}" \
   > /dev/null
 
 echo "[$(date +%H:%M:%S)] warmup done"
