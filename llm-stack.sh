@@ -1,17 +1,17 @@
-cat llm-stack.sh 
 #!/bin/bash
 # Orchestrateur : précharge sur l'hôte, lance les 2 serveurs dans le distrobox, puis warmup.
 # Chat = Qwen3.5-35B-A3B (MoE HYBRIDE Gated DeltaNet). ⚠ GDN : reprocessing complet du
 # prompt à chaque tour (pas de KV cache reuse propre comme le 30B-2507) -> follow-ups plus lents.
 # FIM = DeepSeek-Coder-V2-Lite (Q5_K_M) pour l'autocomplétion de code.
+# Tous les chemins dérivent de $HOME → aucun chemin machine en dur.
 set -u
 
 LOGDIR="$HOME/llm-logs"
 mkdir -p "$LOGDIR"
 
 CONTAINER="llm"
-MAIN_SCRIPT="/home/NJMER/start-llm.sh"
-FIM_SCRIPT="/home/NJMER/start-llm-fast.sh"
+MAIN_SCRIPT="$HOME/start-llm.sh"
+FIM_SCRIPT="$HOME/start-llm-fast.sh"
 
 # --- Modèle de chat courant ---------------------------------------------------
 # Pour changer de modèle : édite start-llm.sh (--hf-repo/--hf-file/--alias)
@@ -20,14 +20,14 @@ CHAT_ALIAS="qwen3.5-35b-a3b"
 CHAT_PORT=8080
 
 # --- Configuration FIM (DeepSeek-Coder-V2-Lite) -------------------------------
-FIM_ALIAS="deepseek-coder-fim" # Vérifiez que c'est bien l'alias dans start-llm-fast.sh
+FIM_ALIAS="deepseek-coder-q5"   # doit correspondre à --alias dans start-llm-fast.sh
 FIM_PORT=8081
 # -----------------------------------------------------------------------------
 
 cmd="${1:-start}"
 
 stop_all() {
-  echo "⏹  Arrêt des serveurs..."
+  echo "⏹ Arrêt des serveurs..."
   distrobox enter "$CONTAINER" -- pkill -f "llama-server" </dev/null 2>/dev/null || true
   sleep 2
   distrobox enter "$CONTAINER" -- pkill -9 -f "llama-server" </dev/null 2>/dev/null || true
@@ -37,7 +37,7 @@ stop_all() {
 
 wait_ready() {
   local port=$1 timeout=$2 label=$3 pidfile=${4:-}
-  echo -n "    Attente $label (port $port)"
+  echo -n "  Attente $label (port $port)"
   local i=0
   while true; do
     if curl -sf "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
@@ -69,14 +69,14 @@ launch_detached() {
 
 warmup_chat() {
   local prompt="Tu es un assistant de code concis. Explique etape par etape comment implementer une file de priorite (tas binaire) generique en TypeScript avec insert, pop, peek et heapify, en donnant la complexite de chaque operation."
-  echo "🌡  Warmup chat ($CHAT_ALIAS) ..."
+  echo "🌡 Warmup chat ($CHAT_ALIAS) ..."
   if curl -s "http://127.0.0.1:$CHAT_PORT/v1/chat/completions" \
-       -H "Content-Type: application/json" \
-       -d "{\"model\":\"$CHAT_ALIAS\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":64,\"stream\":false}" \
-       >/dev/null 2>&1; then
-    echo "🌡  Warmup chat terminé ✅"
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$CHAT_ALIAS\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":64,\"stream\":false}" \
+    >/dev/null 2>&1; then
+    echo "🌡 Warmup chat terminé ✅"
   else
-    echo "🌡  Warmup chat échoué (serveur pas prêt ?) ⚠"
+    echo "🌡 Warmup chat échoué (serveur pas prêt ?) ⚠"
   fi
 }
 
@@ -87,24 +87,21 @@ def factorial(n):
     if n <= 1:
         return 1
     return n * factorial(n - 1)
-
 # Tester la fonction
 print(factorial(5))"
-  
-  echo "🌡  Warmup FIM ($FIM_ALIAS) ..."
+  echo "🌡 Warmup FIM ($FIM_ALIAS) ..."
   if curl -s "http://127.0.0.1:$FIM_PORT/v1/completions" \
-       -H "Content-Type: application/json" \
-       -d "{\"prompt\":\"$prompt\",\"max_tokens\":32,\"stream\":false}" \
-       >/dev/null 2>&1; then
-    echo "🌡  Warmup FIM terminé ✅"
+    -H "Content-Type: application/json" \
+    -d "{\"prompt\":\"$prompt\",\"max_tokens\":32,\"stream\":false}" \
+    >/dev/null 2>&1; then
+    echo "🌡 Warmup FIM terminé ✅"
   else
-    echo "🌡  Warmup FIM échoué ⚠"
+    echo "🌡 Warmup FIM échoué ⚠"
   fi
 }
 
 start_all() {
   echo "═══ Stack LLM — Qwen3.5-35B-A3B (chat) + DeepSeek-V2-Lite (FIM) ═══"
-
   echo "📦 [1/4] podman start $CONTAINER"
   podman start "$CONTAINER" </dev/null >/dev/null 2>&1
 
@@ -125,8 +122,7 @@ start_all() {
     CHAT_ALIAS='$CHAT_ALIAS' CHAT_PORT='$CHAT_PORT' FIM_PORT='$FIM_PORT'; \
     warmup_chat; warmup_fim" </dev/null >>"$LOGDIR/warmup.log" 2>&1 &
   disown
-  echo "🌡  Warmup lancé en arrière-plan (voir $LOGDIR/warmup.log)"
-
+  echo "🌡 Warmup lancé en arrière-plan (voir $LOGDIR/warmup.log)"
   echo "═══ Stack prête ═══"
 }
 
@@ -147,5 +143,5 @@ case "$cmd" in
   status)  status ;;
   logs)    tail -F "$LOGDIR"/*.log ;;
   warmup)  warmup_chat; warmup_fim ;;
-  *)       echo "Usage: $0 {start|stop|restart|status|logs|warmup}"; exit 1 ;;
+  *) echo "Usage: $0 {start|stop|restart|status|logs|warmup}"; exit 1 ;;
 esac
