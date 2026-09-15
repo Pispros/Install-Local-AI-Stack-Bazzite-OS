@@ -1,5 +1,8 @@
 #!/bin/bash
-# Serveur FIM (autocompletion) : Qwen2.5-Coder-1.5B base sur Radeon 780M (Vulkan/RADV), port 8081
+# Serveur FIM (autocompletion) : DeepSeek-Coder-V2-Lite (Q5_K_M)
+# Optimisé pour Radeon 780M (Vulkan/RADV) - Contexte 16384
+# Port: 8081
+
 export AMD_VULKAN_ICD=RADV
 export RADV_PERFTEST=gpl
 export RADV_DEBUG=zerovram
@@ -10,16 +13,20 @@ export OMP_NUM_THREADS=4
 export GOMP_CPU_AFFINITY="8-11"
 mkdir -p "$MESA_SHADER_CACHE_DIR"
 
+echo "Démarrage du serveur DeepSeek-Coder-V2-Lite (Q5_K_M) sur port 8081..."
+
 exec /home/NJMER/llama.cpp/build/bin/llama-server \
-  -hf ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF \
-  --alias qwen-coder-fim \
+  -hf bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF:Q5_K_M \
+  --alias deepseek-coder-q5 \
   -ngl 99 \
-  --ctx-size 8192 \
+  --ctx-size 16384 \
   --parallel 1 \
   -fa on \
   --cache-reuse 256 \
-  -b 1024 -ub 1024 \
+  -b 2048 -ub 2048 \
   --threads 4 --threads-batch 4 \
   --no-warmup \
   --host 0.0.0.0 --port 8081 \
-  --temp 0.1 --top-p 0.9
+  --temp 0.1 --top-p 0.9 \
+  --top-k 40 \
+  --repeat-penalty 1.1
