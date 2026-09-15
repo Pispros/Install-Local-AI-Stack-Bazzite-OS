@@ -1,7 +1,7 @@
 #!/bin/bash
 # Précharge en page cache (hôte) les .gguf RÉELLEMENT référencés par les scripts
-# de lancement. Lit --hf-file ; à défaut, lit -hf repo[:file] et résout le gguf
-# du repo dans le cache HF. Aucun nom de modèle en dur.
+# de lancement. Lit --hf-file ; à défaut le nom du .gguf (cas -m local) ; à défaut
+# -hf repo[:file] et résout le gguf du repo dans le cache HF. Aucun nom en dur.
 set -u
 
 HF_HUB="$HOME/.cache/huggingface/hub"
@@ -13,6 +13,13 @@ arg_from() {
   local file=$1 flag=$2
   [ -f "$file" ] || return 1
   grep -oE -- "$flag[[:space:]]+[^[:space:]\\\\]+" "$file" | head -n1 | awk '{print $2}'
+}
+
+# Premier nom de fichier .gguf mentionné dans un script (hors mmproj) — cas -m local.
+gguf_name_from() {
+  local file=$1
+  [ -f "$file" ] || return 1
+  grep -oE '[A-Za-z0-9._-]+\.gguf' "$file" | grep -iv 'mmproj' | head -n1
 }
 
 # Résout un .gguf (par son nom de fichier) vers son blob réel.
@@ -39,7 +46,7 @@ resolve_repo_gguf() {
 preload() {
   local path=$1 label=$2
   if [ -z "$path" ] || [ ! -f "$path" ]; then
-    echo "  ⚠  $label introuvable en cache"
+    echo "  ⚠ $label introuvable en cache"
     return
   fi
   echo "  → $label ($(du -h "$path" | cut -f1)) : $path"
@@ -50,8 +57,9 @@ preload() {
   fi
 }
 
-# CHAT : via --hf-file
+# CHAT : --hf-file, sinon nom du .gguf (cas -m local depuis le cache HF)
 CHAT_FILE=$(arg_from "$CHAT_SCRIPT" "--hf-file")
+[ -z "${CHAT_FILE:-}" ] && CHAT_FILE=$(gguf_name_from "$CHAT_SCRIPT")
 MAIN=$(resolve_gguf "${CHAT_FILE:-__none__}")
 
 # FIM : --hf-file si présent, sinon -hf repo[:file]
@@ -67,6 +75,6 @@ fi
 
 echo "🔥 Préchargement page cache..."
 START=$(date +%s)
-preload "$MAIN" "CHAT  (${CHAT_FILE:-?})"
-preload "$FIM"  "FIM   (${FIM_LABEL})"
+preload "$MAIN" "CHAT (${CHAT_FILE:-?})"
+preload "$FIM"  "FIM (${FIM_LABEL})"
 echo "✅ Terminé en $(($(date +%s)-START))s"
