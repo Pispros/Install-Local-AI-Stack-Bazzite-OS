@@ -32,7 +32,13 @@ bash ~/llm-stack.sh stop|restart|logs
 
 ## Web search (optional)
 
-Add `searxng/settings.yml` (with your Tavily key) and `searxng/tavily.py`, then `podman compose -f SearXNG-compose.yml up -d`. In the WebUI add `http://localhost:3333/mcp`, **save**, reopen via the pencil, enable **"use llama-server proxy"**.
+`init.sh` writes `searxng/settings.yml` (with a random `secret_key`) and `searxng/tavily.py`. Just set your Tavily key — either re-run with `TAVILY_API_KEY=tvly-... ./init.sh`, or edit `searxng/settings.yml` — then:
+
+```bash
+podman compose -f SearXNG-compose.yml up -d
+```
+
+In the WebUI add `http://localhost:3333/mcp`, **save**, reopen via the pencil, enable **"use llama-server proxy"**.
 
 ## Files
 
