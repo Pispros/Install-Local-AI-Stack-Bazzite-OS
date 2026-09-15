@@ -15,7 +15,7 @@ mkdir -p "$MESA_SHADER_CACHE_DIR"
 
 echo "Démarrage du serveur DeepSeek-Coder-V2-Lite (Q5_K_M) sur port 8081..."
 
-exec /home/NJMER/llama.cpp/build/bin/llama-server \
+exec /home/xxx/llama.cpp/build/bin/llama-server \
   -hf bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF:Q5_K_M \
   --alias deepseek-coder-q5 \
   -ngl 99 \
