@@ -1,41 +1,49 @@
-# open-webSearch MCP server — AUCUNE CLÉ API REQUISE
-# Recherche web multi-moteurs (DuckDuckGo, Bing, Brave, Baidu, ...) pour la WebUI llama.cpp.
+# SearXNG (métamoteur) + mcp-searxng (HTTP) pour la WebUI llama.cpp.
+#
+# Moteurs actifs : Tavily (web général, via clé API — insensible aux blocages d'IP/VPN),
+# Stack Overflow + Arch Wiki (technique). Bing retiré (résultats hors-sujet).
+# ⚠ La clé Tavily vit dans searxng/settings.yml (api_key: "tvly-…"), PAS ici.
 #
 # 1. Lancer :        podman compose up -d        (ou docker compose up -d)
-# 2. Vérifier :      podman compose logs -f       puis  curl http://localhost:3333/mcp
+# 2. Test SearXNG :  curl 'http://localhost:8888/search?q=test&engines=tavily&format=json'
 # 3. Endpoint MCP :  http://<host>:3333/mcp        (streamable HTTP)
-#    Fallback SSE :  http://<host>:3333/sse
 #
-# Connexion dans la WebUI llama.cpp :
+# Connexion dans la WebUI llama.cpp (inchangée) :
 #   - ajoute l'URL /mcp comme serveur MCP, puis SAUVEGARDE
-#   - rouvre-la via l'icône crayon (edit) et active "use llama-server proxy"
-#   - démarre llama-server avec --ui-mcp-proxy   (déjà fait dans start-llm.sh)
+#   - rouvre via l'icône crayon et active "use llama-server proxy"
+#   - llama-server démarré avec --ui-mcp-proxy (déjà fait)
 #
-# ⚠ Sécurité : le cors-proxy de llama-server est un proxy ouvert (risque SSRF).
-#   Ne l'expose pas sur Internet — garde la stack sur un réseau de confiance.
+# ⚠ Garde la stack sur un réseau de confiance (le cors-proxy de llama-server est ouvert).
 services:
-  open-websearch:
-    image: ghcr.io/aas-ee/open-web-search:latest
-    container_name: open-websearch
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
     restart: unless-stopped
-    init: true
     environment:
-      # CORS activé car la WebUI est un client navigateur.
-      - ENABLE_CORS=true
-      - CORS_ORIGIN=*
-      # Moteur par défaut. Options : duckduckgo, bing, brave, baidu.
-      - DEFAULT_SEARCH_ENGINE=duckduckgo
-      # Moteurs autorisés (séparés par des virgules).
-      - ALLOWED_SEARCH_ENGINES=duckduckgo,bing,brave
-      # Port INTERNE au conteneur (garde-le en phase avec "ports:").
-      - PORT=3000
-      # Si ton réseau exige un proxy sortant pour joindre les moteurs :
-      # - USE_PROXY=true
-      # - PROXY_URL=http://your-proxy-host:port
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro,z
+      # Moteur custom Tavily — rend l'injection podman cp permanente :
+      - ./searxng/tavily.py:/usr/local/searxng/searx/engines/tavily.py:ro,z
     ports:
-      # host:container
-      - "3333:3000"
-    deploy:
-      restart_policy:
-        condition: any
-        delay: 5s
+      - "8888:8080"          # UI + API JSON, pour debug (facultatif)
+    networks: [searxnet]
+
+  searxng-mcp:
+    image: docker.io/isokoliuk/mcp-searxng:latest
+    container_name: searxng-mcp
+    restart: unless-stopped
+    depends_on: [searxng]
+    environment:
+      # SEARXNG_URL = seule variable obligatoire ; nom de service interne.
+      - SEARXNG_URL=http://searxng:8080
+      # Force le transport HTTP streamable (défaut du conteneur = stdio).
+      - MCP_HTTP_HOST=0.0.0.0
+      - MCP_HTTP_PORT=3000
+    ports:
+      - "3333:3000"          # endpoint MCP : http://<host>:3333/mcp
+    networks: [searxnet]
+
+networks:
+  searxnet:
+    driver: bridge
