@@ -2,6 +2,7 @@
 # Serveur FIM (autocompletion) : DeepSeek-Coder-V2-Lite (Q5_K_M)
 # Optimisé pour Radeon 780M (Vulkan/RADV) - Contexte 16384
 # Port: 8081
+# Tous les chemins dérivent de $HOME → aucun chemin machine en dur.
 
 export AMD_VULKAN_ICD=RADV
 export RADV_PERFTEST=gpl
@@ -13,9 +14,10 @@ export OMP_NUM_THREADS=4
 export GOMP_CPU_AFFINITY="8-11"
 mkdir -p "$MESA_SHADER_CACHE_DIR"
 
-echo "Démarrage du serveur DeepSeek-Coder-V2-Lite (Q5_K_M) sur port 8081..."
+LLAMA_DIR="$HOME/llama.cpp/build"
 
-exec /home/xxx/llama.cpp/build/bin/llama-server \
+echo "Démarrage du serveur DeepSeek-Coder-V2-Lite (Q5_K_M) sur port 8081..."
+exec "$LLAMA_DIR/bin/llama-server" \
   -hf bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF:Q5_K_M \
   --alias deepseek-coder-q5 \
   -ngl 99 \
