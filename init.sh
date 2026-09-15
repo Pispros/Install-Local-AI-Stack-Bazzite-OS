@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # init.sh — plug-and-play installer for the local LLM stack (Bazzite / Radeon 780M).
 #
-# Does everything:
-#   1. installs the stack scripts into $HOME and rewrites the hard-coded
-#      /home/xxx and /home/NJMER paths to YOUR $HOME (incl. the llama-server
-#      binary path in start-llm.sh + start-llm-fast.sh);
-#   2. prepares the bubblewrap working dir (~/All/llm-working-dir);
-#   3. creates the 'llm' Fedora distrobox with GPU passthrough;
-#   4. builds llama.cpp with the Vulkan backend at ~/llama.cpp/build.
+# The stack scripts already use $HOME everywhere, so they are correct on any machine.
+# init.sh does the machine setup and, as a safety net, normalizes any leftover
+# hard-coded /home/<user> path to THIS machine's $HOME:
+#   1. install the stack scripts into $HOME (+ normalize any stray /home/<user>);
+#   2. prepare the bubblewrap working dir (~/All/llm-working-dir);
+#   3. create the 'llm' Fedora distrobox with GPU passthrough;
+#   4. build llama.cpp with the Vulkan backend at ~/llama.cpp/build.
 #
-# Re-runnable (idempotent). Run it from the cloned repo:  ./init.sh
+# Re-runnable (idempotent). Run from the cloned repo:  ./init.sh
 set -euo pipefail
 
 # ── config ───────────────────────────────────────────────────────────────────
@@ -18,7 +18,6 @@ IMAGE="registry.fedoraproject.org/fedora-toolbox:41"   # bump if you like
 WORK_DIR="$HOME/All/llm-working-dir"                    # bubblewrap sandbox (chat writes only here)
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS=(llm-stack.sh start-llm.sh start-llm-fast.sh preload-models.sh warmup-llm.sh)
-# Target build dir: $HOME/llama.cpp/build  ->  matches "/home/<you>/llama.cpp/build"
 # ─────────────────────────────────────────────────────────────────────────────
 
 say(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -26,13 +25,15 @@ say(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 command -v distrobox >/dev/null || { echo "distrobox missing — on Bazzite: 'ujust install-distrobox'"; exit 1; }
 command -v podman    >/dev/null || { echo "podman missing"; exit 1; }
 
-# 1) install scripts to $HOME and rewrite placeholder paths -> your $HOME
-say "Installing scripts to \$HOME and rewriting /home/xxx, /home/NJMER -> $HOME"
+# 1) install scripts to $HOME + normalize any hard-coded /home/<user> to this $HOME
+say "Installing scripts to \$HOME (paths -> $HOME)"
 for f in "${SCRIPTS[@]}"; do
   [ -f "$REPO_DIR/$f" ] || { echo "missing $f in repo"; exit 1; }
   install -m 0755 "$REPO_DIR/$f" "$HOME/$f"
-  sed -i -e "s#/home/xxx#$HOME#g" -e "s#/home/NJMER#$HOME#g" "$HOME/$f"
+  # rewrite any absolute /home/<user> (xxx, NJMER, whatever) to the real $HOME
+  sed -i -E "s#/home/[A-Za-z0-9._-]+#$HOME#g" "$HOME/$f"
 done
+echo "  ✔ llama-server binary path resolves to $HOME/llama.cpp/build in start-llm.sh + start-llm-fast.sh"
 
 # 2) bubblewrap working dir + minimal MCP config file
 say "Preparing working dir $WORK_DIR"
