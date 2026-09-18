@@ -1,6 +1,6 @@
-# Local LLM stack — Radeon 780M / Bazzite OS
+# Local LLM stack — Bazzite OS
 
-Local **chat + code-autocomplete + web-search** for the Radeon 780M iGPU on Bazzite, running `llama.cpp` (Vulkan) inside a Fedora **distrobox** (`llm`). The chat server runs in a **bubblewrap** sandbox nested in the box.
+Local **chat + code-autocomplete + web-search** on Bazzite, running `llama.cpp` (Vulkan) inside a Fedora **distrobox** (`llm`). The chat server runs in a **bubblewrap** sandbox nested in the box.
 
 | Service         | Model                              | Port        |
 | --------------- | ---------------------------------- | ----------- |
