@@ -60,7 +60,7 @@ exec bwrap \
     -hf "$HF_MODEL" \
     --alias qwen3-coder-next \
     -ngl 99 \
-    --ctx-size 131072 \
+    --ctx-size 261120 \
     --parallel 1 \
     --slot-save-path "$SLOT_DIR" \
     -fa on \
@@ -71,6 +71,6 @@ exec bwrap \
     --jinja \
     --tools read_file,write_file,edit_file,grep_search,file_glob_search,exec_shell_command \
     --cors-origins '*' \
-    --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 \
+    --temp 1.0 --top-p 0.95 --top-k 40 --min-p 0 \
     --ui-mcp-proxy \
     --ui-config-file "/home/NJMER/All/llm-working-dir/mcp.json"
