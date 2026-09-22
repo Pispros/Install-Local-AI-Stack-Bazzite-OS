@@ -32,9 +32,12 @@ mkdir -p "$WORK_DIR" "$SLOT_DIR" "$MESA_SHADER_CACHE_DIR" "$LLAMA_CACHE"
 
 LLAMA_DIR="/home/NJMER/llama.cpp/build"                 # binaire + libs (ro)
 
-# ── Modèle : Qwen3-Coder-Next, quant UD-IQ4_XS (~38,4 Go). llama-server le télécharge
-#    au 1er lancement dans $LLAMA_CACHE, puis le réutilise (aucun download ensuite). ──
-HF_MODEL="unsloth/Qwen3-Coder-Next-GGUF:UD-IQ4_XS"
+# ── Modèle : Qwen3-Coder-Next, quant UD-Q4_K_XL (~40-42 Go). K-quant choisi exprès :
+#    sur backend Vulkan (RADV), les i-quants (IQ4_XS) sont mal supportés et font planter
+#    llama-server sur RDNA3 avec le template de chat complet -> on prend un K-quant.
+#    llama-server le télécharge au 1er lancement dans $LLAMA_CACHE, puis le réutilise
+#    (aucun download ensuite). ──
+HF_MODEL="unsloth/Qwen3-Coder-Next-GGUF:UD-Q4_K_XL"
 
 exec bwrap \
   --die-with-parent \
@@ -57,12 +60,12 @@ exec bwrap \
     -hf "$HF_MODEL" \
     --alias qwen3-coder-next \
     -ngl 99 \
-    --ctx-size 262144 \
+    --ctx-size 131072 \
     --parallel 1 \
     --slot-save-path "$SLOT_DIR" \
     -fa on \
     --cache-type-k q8_0 --cache-type-v q8_0 \
-    -b 2048 -ub 512 \
+    -b 1024 -ub 256 \
     --threads 8 --threads-batch 8 \
     --host 0.0.0.0 --port 8080 \
     --jinja \
