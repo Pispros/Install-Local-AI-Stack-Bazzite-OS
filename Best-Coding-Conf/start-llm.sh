@@ -14,8 +14,9 @@
 #   Sur le 780M, la "VRAM" = RAM système (GTT). Avec mmap (défaut), llama.cpp garde
 #   le GGUF en page cache ET recopie les poids dans le buffer device Vulkan -> le
 #   modèle est compté ~2x en RAM (~40 Go -> ~80 Go > 64 Go -> swap). On force donc
-#   --no-mmap : chargement direct en mémoire, empreinte ~1x. Robuste même si la
-#   détection iGPU du "load-mode auto" (PR#26081) ne se déclenche pas dans le jail.
+#   --load-mode none (ancien --no-mmap, supprimé des builds récents) : chargement
+#   direct en mémoire, empreinte ~1x. Robuste même si la détection iGPU du
+#   "load-mode auto" (PR#26081) ne se déclenche pas dans le jail.
 #   Contexte laissé à 255k (261120) : léger pour ce MoE.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -69,7 +70,7 @@ exec bwrap \
     -hf "$HF_MODEL" \
     --alias qwen3-coder-next \
     -ngl 99 \
-    --no-mmap \
+    --load-mode none \
     --ctx-size 261120 \
     --parallel 1 \
     --slot-save-path "$SLOT_DIR" \
