@@ -9,6 +9,15 @@
 # MCP distant (searxng-mcp) branché via la WebUI : nécessite --ui-mcp-proxy (dernière ligne).
 # ÉCRITURES : uniquement $WORK_DIR. LECTURES : $WORK_DIR (rw) + runtime ro.
 # Nested podman : /proc bindé, pas d'unshare-pid → sinon "Can't mount proc: Operation not permitted".
+#
+# ── FIX MÉMOIRE (double allocation mmap sur iGPU/UMA) ──────────────────────────
+#   Sur le 780M, la "VRAM" = RAM système (GTT). Avec mmap (défaut), llama.cpp garde
+#   le GGUF en page cache ET recopie les poids dans le buffer device Vulkan -> le
+#   modèle est compté ~2x en RAM (~40 Go -> ~80 Go > 64 Go -> swap). On force donc
+#   --no-mmap : chargement direct en mémoire, empreinte ~1x. Robuste même si la
+#   détection iGPU du "load-mode auto" (PR#26081) ne se déclenche pas dans le jail.
+#   Contexte laissé à 255k (261120) : léger pour ce MoE.
+# ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 command -v bwrap >/dev/null || { echo "bwrap absent : sudo dnf install -y bubblewrap"; exit 1; }
@@ -60,6 +69,7 @@ exec bwrap \
     -hf "$HF_MODEL" \
     --alias qwen3-coder-next \
     -ngl 99 \
+    --no-mmap \
     --ctx-size 261120 \
     --parallel 1 \
     --slot-save-path "$SLOT_DIR" \
