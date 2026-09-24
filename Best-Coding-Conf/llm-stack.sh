@@ -33,16 +33,6 @@ stop_all() {
   echo "✅ Arrêté"
 }
 
-# Arrête UNIQUEMENT le serveur FIM (port $FIM_PORT) et ne le relance pas.
-stop_fim() {
-  echo "⏹  Arrêt FIM (port $FIM_PORT), sans relance..."
-  distrobox enter "$CONTAINER" -- pkill -f "port $FIM_PORT" </dev/null 2>/dev/null || true
-  sleep 1
-  distrobox enter "$CONTAINER" -- pkill -9 -f "port $FIM_PORT" </dev/null 2>/dev/null || true
-  rm -f "$LOGDIR/fim.pid"
-  echo "✅ FIM arrêté"
-}
-
 wait_ready() {
   local port=$1 timeout=$2 label=$3 pidfile=${4:-}
   echo -n "    Attente $label (port $port)"
@@ -121,14 +111,19 @@ start_all() {
   # timeout large : couvre un 1er download complet (~38 Go). Démarrages suivants = quelques s.
   wait_ready "$CHAT_PORT" 3600 "chat" "$LOGDIR/main.pid"
 
-  echo "⚡ [3/3] Qwen2.5-Coder-3B FIM sur :$FIM_PORT (download auto si absent)..."
-  launch_detached "$FIM_SCRIPT" "$LOGDIR/fim.log" "$LOGDIR/fim.pid"
-  wait_ready "$FIM_PORT" 600 "FIM" "$LOGDIR/fim.pid"
+  # SKIP_FIM=1 -> restart normal mais sans FIM (voir case restart fim)
+  if [ "${SKIP_FIM:-}" != "1" ]; then
+    echo "⚡ [3/3] Qwen2.5-Coder-3B FIM sur :$FIM_PORT (download auto si absent)..."
+    launch_detached "$FIM_SCRIPT" "$LOGDIR/fim.log" "$LOGDIR/fim.pid"
+    wait_ready "$FIM_PORT" 600 "FIM" "$LOGDIR/fim.pid"
+  fi
 
   # Warmup détaché : ne bloque pas, ne pollue pas l'écran.
+  local warm="warmup_chat"
+  [ "${SKIP_FIM:-}" != "1" ] && warm="warmup_chat; warmup_fim"
   setsid bash -c "$(declare -f warmup_chat warmup_fim); \
     CHAT_ALIAS='$CHAT_ALIAS' CHAT_PORT='$CHAT_PORT' FIM_PORT='$FIM_PORT'; \
-    warmup_chat; warmup_fim" </dev/null >>"$LOGDIR/warmup.log" 2>&1 &
+    $warm" </dev/null >>"$LOGDIR/warmup.log" 2>&1 &
   disown
   echo "🌡  Warmup lancé en arrière-plan (voir $LOGDIR/warmup.log)"
 
@@ -149,9 +144,9 @@ case "$cmd" in
   start)   start_all ;;
   stop)    stop_all ;;
   restart)
-    # ./llm-stack.sh restart fim  -> arrête FIM et ne le relance pas
+    # ./llm-stack.sh restart fim  -> restart normal mais SANS fim (arrête aussi le process fim)
     if [ "${2:-}" = "fim" ]; then
-      stop_fim
+      stop_all; sleep 2; SKIP_FIM=1 start_all
     else
       stop_all; sleep 2; start_all
     fi
