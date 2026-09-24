@@ -42,11 +42,17 @@ mkdir -p "$WORK_DIR" "$SLOT_DIR" "$MESA_SHADER_CACHE_DIR" "$LLAMA_CACHE"
 
 LLAMA_DIR="/home/NJMER/llama.cpp/build"                 # binaire + libs (ro)
 
-# ── Modèle : Qwen3-Coder-Next, quant UD-Q4_K_XL (~40-42 Go). K-quant choisi exprès :
-#    sur backend Vulkan (RADV), les i-quants (IQ4_XS) sont mal supportés et font planter
-#    llama-server sur RDNA3 avec le template de chat complet -> on prend un K-quant.
-#    llama-server le télécharge au 1er lancement dans $LLAMA_CACHE, puis le réutilise
-#    (aucun download ensuite). ──
+# ── Modèle : Qwen3-Coder-Next, quant UD-Q4_K_XL (~49,6 Go). Le swap constaté
+#    auparavant n'était PAS dû au quant : c'est le cache de prompt côté serveur qui
+#    accumulait l'état récurrent GDN sans borne (chaque entrée/checkpoint porte
+#    l'état récurrent complet -> croissance linéaire jusqu'à l'OOM, issue llama.cpp
+#    #29324). Piège : --cache-ram -1 ("pas de limite") NE borne PAS la mémoire ; il
+#    faut une valeur positive pour que l'éviction travaille. Corrigé plus bas via
+#    --cache-ram 2048 + --ctx-checkpoints 1 -> le Q4 tient à ctx plein (261120).
+#    K-quant Dynamic Unsloth choisi exprès : sur backend Vulkan (RADV), les i-quants
+#    (IQ4_XS) sont mal supportés et font planter llama-server sur RDNA3 avec le
+#    template de chat complet -> on prend un K-quant. llama-server le télécharge au
+#    1er lancement dans $LLAMA_CACHE, puis le réutilise (aucun download ensuite). ──
 HF_MODEL="unsloth/Qwen3-Coder-Next-GGUF:UD-Q4_K_XL"
 
 exec bwrap \
@@ -73,6 +79,8 @@ exec bwrap \
     --load-mode none \
     --ctx-size 261120 \
     --parallel 1 \
+    --cache-ram 2048 \
+    --ctx-checkpoints 1 \
     --slot-save-path "$SLOT_DIR" \
     -fa on \
     --cache-type-k q8_0 --cache-type-v q8_0 \
