@@ -4,7 +4,7 @@
 # Port: 8081
 # -hf télécharge automatiquement le modèle s'il est absent du cache (download-if-missing natif).
 #
-# ── FIX MÉMOIRE : --no-mmap ajouté (double allocation mmap sur iGPU/UMA). ──
+# ── FIX MÉMOIRE : --load-mode none (ancien --no-mmap, supprimé des builds récents). ──
 #   Même raison que le serveur chat : sur le 780M la "VRAM" = RAM, et mmap fait
 #   compter le modèle 2x. Petit modèle (~2.5 Go) donc impact modeste ici, mais on
 #   uniformise pour ne pas gaspiller de RAM quand les deux serveurs tournent ensemble.
@@ -25,7 +25,7 @@ exec /home/NJMER/llama.cpp/build/bin/llama-server \
   -hf bartowski/Qwen2.5-Coder-3B-GGUF:Q5_K_M \
   --alias qwen2.5-coder-3b \
   -ngl 99 \
-  --no-mmap \
+  --load-mode none \
   --ctx-size 16384 \
   --parallel 1 \
   -fa on \
